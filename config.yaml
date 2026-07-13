@@ -16,7 +16,7 @@ target_agent:
 llm:
   provider: deepseek                 
   model: deepseek-v4-pro            
-  api_key: sk-6ed464d6e0ea43a3a356c650646a21ea             
+  api_key: sk-6ed464d6e0ea43a3a356**********             
   base_url: https://api.deepseek.com 
 
 
