@@ -13,7 +13,14 @@ class VerificationEngine:
     """并行调度已注册校验器，不感知具体校验点。"""
 
     def __init__(self, validators: list[Validator]):
-        """保存校验器，并拒绝可能覆盖结果的重复名称。"""
+        """保存校验器，并拒绝可能覆盖结果的重复名称。
+
+        Args:
+            validators: 已初始化的校验器列表。
+
+        Raises:
+            ValueError: 多个校验器使用相同名称。
+        """
         names = [validator.name for validator in validators]
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
@@ -21,7 +28,14 @@ class VerificationEngine:
         self.validators = validators
 
     async def verify(self, context: ValidationContext) -> VerifiedData:
-        """并行执行全部校验器，隔离异常并计算整体状态。"""
+        """并行执行全部校验器，隔离异常并计算整体状态。
+
+        Args:
+            context: 当前用例的共享校验上下文。
+
+        Returns:
+            包含动态检查项和整体状态的完整校验结果。
+        """
         raw_results = await asyncio.gather(
             *(validator.validate(context) for validator in self.validators),
             return_exceptions=True,

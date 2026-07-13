@@ -17,17 +17,35 @@ class I18nValidator:
     name = "i18n"
 
     def __init__(self, agent: Any):
-        """保存负责中文输出合规判定的 LLM Agent。"""
+        """保存负责中文输出合规判定的 LLM Agent。
+
+        Args:
+            agent: 已配置 i18n 提示词的 LangChain Agent。
+        """
         self.agent = agent
 
     @classmethod
     def create(cls, model: Any) -> "I18nValidator":
-        """使用共享模型和 i18n 提示词创建校验器。"""
+        """使用共享模型和 i18n 提示词创建校验器。
+
+        Args:
+            model: VerificationFactory 创建的共享聊天模型。
+
+        Returns:
+            初始化完成的中文输出合规校验器。
+        """
         return cls(create_agent(model=model, system_prompt=I18N_CHECK_PROMPT))
 
     @staticmethod
     def _build_content(reasoning_answers: list[dict]) -> tuple[str, int]:
-        """把所有待审查字段合并成带安全边界标签的批量输入。"""
+        """把所有待审查字段合并成带安全边界标签的批量输入。
+
+        Args:
+            reasoning_answers: Parser 提取的推理回答列表。
+
+        Returns:
+            批量输入文本和其中非空字段数量。
+        """
         blocks: list[str] = []
         for index, record in enumerate(reasoning_answers):
             if not isinstance(record, dict):
@@ -42,14 +60,28 @@ class I18nValidator:
         return "\n\n".join(blocks), len(blocks)
 
     def _invoke(self, content: str) -> str:
-        """调用 LLM Agent 并提取规范化文本响应。"""
+        """调用 LLM Agent 并提取规范化文本响应。
+
+        Args:
+            content: 发送给校验 Agent 的用户消息。
+
+        Returns:
+            去除首尾空白的 LLM 响应文本。
+        """
         response = self.agent.invoke(
             {"messages": [HumanMessage(content=content)]}
         )
         return extract_text(response["messages"][-1].content).strip()
 
     def _validate_sync(self, reasoning_answers: list[dict]) -> CheckItem:
-        """同步执行批量中文合规检查和格式异常重试。"""
+        """同步执行批量中文合规检查和格式异常重试。
+
+        Args:
+            reasoning_answers: Parser 提取的推理回答列表。
+
+        Returns:
+            中文输出合规检查结果。
+        """
         content, field_count = self._build_content(reasoning_answers)
         if not field_count:
             return CheckItem(
@@ -83,7 +115,14 @@ class I18nValidator:
         )
 
     async def validate(self, context: ValidationContext) -> CheckItem:
-        """在线程中执行 i18n LLM 校验，避免阻塞事件循环。"""
+        """在线程中执行 i18n LLM 校验，避免阻塞事件循环。
+
+        Args:
+            context: 当前用例的共享校验上下文。
+
+        Returns:
+            中文输出合规检查结果。
+        """
         return await asyncio.to_thread(
             self._validate_sync,
             context.parsed.reasoning_answers,

@@ -4,7 +4,7 @@ excel:
 
 target_agent:
   base_url: http://127.0.0.1:8000     
-  api_path: /api/chat                 
+  api_path: /agent/chat                 
   username: admin                     
   password: 123456         
   ip: 10.100.2.142                    

@@ -22,7 +22,14 @@ class SelectionError(ValueError):
 
 
 def normalize_case_ids(values: list[str] | None) -> list[str]:
-    """规范化空格或逗号分隔的 case_id，并按首次出现顺序去重。"""
+    """规范化空格或逗号分隔的 case_id，并按首次出现顺序去重。
+
+    Args:
+        values: CLI 接收的一个或多个 case_id 字符串。
+
+    Returns:
+        规范化且去重后的 case_id 列表。
+    """
     if not values:
         return []
     result: list[str] = []
@@ -39,7 +46,18 @@ def normalize_case_ids(values: list[str] | None) -> list[str]:
 def select_test_cases(
     test_cases: list[TestCase], requested_ids: list[str] | None
 ) -> list[TestCase]:
-    """按请求顺序选择测试用例，并在 ID 不存在时给出明确错误。"""
+    """按请求顺序选择测试用例，并在 ID 不存在时给出明确错误。
+
+    Args:
+        test_cases: Excel 中加载的全部测试用例。
+        requested_ids: 需要执行的 case_id；为 ``None`` 时选择全部用例。
+
+    Returns:
+        按请求顺序排列的测试用例。
+
+    Raises:
+        SelectionError: 任意请求 ID 不存在。
+    """
     if requested_ids is None:
         return test_cases
     case_map = {case.case_id: case for case in test_cases}
@@ -53,7 +71,14 @@ def select_test_cases(
 
 
 def format_completion_summary(totals: dict[str, int]) -> str:
-    """生成包含各状态数量及通过率的最终日志。"""
+    """生成包含各状态数量及通过率的最终日志。
+
+    Args:
+        totals: 以执行状态为键、执行次数为值的统计字典。
+
+    Returns:
+        可直接打印的最终统计文本。
+    """
     total = sum(totals.values())
     pass_rate = totals.get("PASS", 0) / total if total else 0.0
     counts = ", ".join(f"{status}={count}" for status, count in totals.items())
@@ -61,7 +86,14 @@ def format_completion_summary(totals: dict[str, int]) -> str:
 
 
 def _execution_status(verified: VerifiedData) -> str:
-    """把动态校验结果转换为批跑内部统计状态。"""
+    """把动态校验结果转换为批跑内部统计状态。
+
+    Args:
+        verified: 完整校验结果。
+
+    Returns:
+        ``PASS``、``FAILED`` 或 ``ERROR``。
+    """
     if verified.result is CheckStatus.PASS:
         return "PASS"
     if verified.result is CheckStatus.FAILED:
@@ -70,7 +102,17 @@ def _execution_status(verified: VerifiedData) -> str:
 
 
 def _excel_status(status: str) -> ExcelRowResult:
-    """把内部统计状态映射为 Excel 最终结果枚举。"""
+    """把内部统计状态映射为 Excel 最终结果枚举。
+
+    Args:
+        status: 批跑内部统计状态。
+
+    Returns:
+        对应的 Excel 最终结果。
+
+    Raises:
+        KeyError: 状态不是 ``PASS``、``FAILED`` 或 ``ERROR``。
+    """
     return {
         "PASS": ExcelRowResult.PASS,
         "FAILED": ExcelRowResult.FAILED,
@@ -85,7 +127,18 @@ async def _execute_attempt(
     engine: VerificationEngine,
     artifacts: ArtifactStore,
 ) -> tuple[str, ExcelRowResult, VerifiedData | None]:
-    """执行一次调用、解析、校验和产物保存流水线。"""
+    """执行一次调用、解析、校验和产物保存流水线。
+
+    Args:
+        testcase: 当前测试用例。
+        attempt: 当前用例的执行序号，从一开始。
+        config: 完整项目配置。
+        engine: 校验调度引擎。
+        artifacts: JSON 产物存储。
+
+    Returns:
+        内部状态、Excel 状态和可选完整校验结果组成的元组。
+    """
     raw_answer: RawAnswer | None = None
     parsed_answer: ParsedAgentAnswer | None = None
     verified: VerifiedData | None = None
@@ -158,7 +211,19 @@ async def _execute_case(
     artifacts: ArtifactStore,
     semaphore: asyncio.Semaphore,
 ) -> tuple[str, list[tuple[str, ExcelRowResult, VerifiedData | None]]]:
-    """在并发限制内串行执行同一用例的全部重复次数。"""
+    """在并发限制内串行执行同一用例的全部重复次数。
+
+    Args:
+        testcase: 当前测试用例。
+        repeat: 该用例需要执行的总次数。
+        config: 完整项目配置。
+        engine: 校验调度引擎。
+        artifacts: JSON 产物存储。
+        semaphore: 限制不同用例并发数量的信号量。
+
+    Returns:
+        case_id 和该用例全部独立执行结果。
+    """
     async with semaphore:
         executions = [
             await _execute_attempt(testcase, attempt, config, engine, artifacts)
@@ -174,7 +239,21 @@ async def run_benchmark(
     repeat: int = 1,
     concurrency: int = 1,
 ) -> list[ExcelRowResult] | None:
-    """组织用例加载、筛选、并发执行、统计和最终 Excel 写回。"""
+    """组织用例加载、筛选、并发执行、统计和最终 Excel 写回。
+
+    Args:
+        project_root: 项目根目录。
+        requested_cases: CLI 指定的 case_id 参数。
+        failed_only: 是否只运行失败目录中的用例。
+        repeat: 每条用例独立执行次数。
+        concurrency: 同时执行的不同用例数量。
+
+    Returns:
+        每次独立执行对应的 Excel 状态；没有有效用例时返回 ``None``。
+
+    Raises:
+        SelectionError: 请求执行的 case_id 不存在于 Excel。
+    """
     config = load_config(project_root / "config.yaml")
     excel_cfg = config["excel"]
     input_path = Path(excel_cfg["input_path"])

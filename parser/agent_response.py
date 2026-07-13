@@ -6,7 +6,18 @@ class ParserError(Exception):
 
 
 def parse_agent_answer(raw_answer: RawAnswer, case_id: str) -> ParsedAgentAnswer:
-    """将目标 Agent 原始响应转换为与校验规则无关的标准结构。"""
+    """将目标 Agent 原始响应转换为与校验规则无关的标准结构。
+
+    Args:
+        raw_answer: 目标 Agent 原始响应。
+        case_id: 当前用例 ID，用于生成可定位的错误消息。
+
+    Returns:
+        标准化后的 Agent 响应数据。
+
+    Raises:
+        ParserError: 响应缺少必需节点或节点类型不正确。
+    """
     raw_data = raw_answer.raw_data
     data = raw_data.get("data")
     if not isinstance(data, dict):

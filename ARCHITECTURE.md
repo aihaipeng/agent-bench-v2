@@ -782,15 +782,15 @@ llm:
 
 未来常见扩展对应的修改位置：
 
-| 需求 | 主要修改位置 |
-|---|---|
-| 新增校验点 | `validators/新文件.py`、`validators/registry.py` |
-| 修改 LLM 提示词 | `core/prompts.py` 或对应 Validator |
-| 兼容新的 Agent 响应结构 | `parser/agent_response.py` |
-| 修改目标 Agent 请求协议 | `caller/call_agent.py` |
-| 修改产物命名或失败目录规则 | `storage/artifacts.py` |
-| 修改 Excel 输入或结果列 | `storage/excel.py` |
-| 修改批跑并发和重试策略 | `runner.py` |
-| 新增 CLI 参数 | `run.py`，必要时传递给 `runner.py` |
+| 需求                       | 主要修改位置                                         |
+| -------------------------- | ---------------------------------------------------- |
+| 新增校验点                 | `validators/新文件.py`、`validators/registry.py` |
+| 修改 LLM 提示词            | `core/prompts.py` 或对应 Validator                 |
+| 兼容新的 Agent 响应结构    | `parser/agent_response.py`                         |
+| 修改目标 Agent 请求协议    | `caller/call_agent.py`                             |
+| 修改产物命名或失败目录规则 | `storage/artifacts.py`                             |
+| 修改 Excel 输入或结果列    | `storage/excel.py`                                 |
+| 修改批跑并发和重试策略     | `runner.py`                                        |
+| 新增 CLI 参数              | `run.py`，必要时传递给 `runner.py`               |
 
 通过上述边界，新功能可以集中在对应模块内完成，避免修改无关模块。

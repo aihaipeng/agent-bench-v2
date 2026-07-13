@@ -11,7 +11,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def _positive_int(value: str) -> int:
-    """解析必须大于等于一的命令行整数。"""
+    """解析必须大于等于一的命令行整数。
+
+    Args:
+        value: 命令行传入的整数文本。
+
+    Returns:
+        解析后的正整数。
+
+    Raises:
+        argparse.ArgumentTypeError: 数值小于一。
+        ValueError: 输入无法转换为整数。
+    """
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("必须大于等于 1")
@@ -19,7 +30,14 @@ def _positive_int(value: str) -> int:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """解析批跑范围、重复次数和并发数等命令行参数。"""
+    """解析批跑范围、重复次数和并发数等命令行参数。
+
+    Args:
+        argv: 待解析参数序列。未提供时读取进程命令行。
+
+    Returns:
+        解析后的命令行命名空间。
+    """
     parser = argparse.ArgumentParser(description="Agent Evaluator")
     selector = parser.add_mutually_exclusive_group()
     selector.add_argument(

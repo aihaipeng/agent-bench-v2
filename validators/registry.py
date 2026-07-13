@@ -15,5 +15,12 @@ VALIDATOR_TYPES = (
 
 
 def build_validators(model: Any) -> list[Validator]:
-    """使用共享模型实例化所有显式注册的校验器。"""
+    """使用共享模型实例化所有显式注册的校验器。
+
+    Args:
+        model: 所有 LLM 校验器共享的聊天模型。
+
+    Returns:
+        按注册顺序创建的校验器列表。
+    """
     return [validator_type.create(model) for validator_type in VALIDATOR_TYPES]
