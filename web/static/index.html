@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Bench</title>
+    <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+    <div class="app-layout">
+        <!-- 左侧竖栏 -->
+        <nav class="sidebar">
+            <div class="sidebar-brand">Agent Bench</div>
+            <ul class="sidebar-nav">
+                <li class="sidebar-item active" data-view="sets">📋 测试集管理</li>
+                <li class="sidebar-item" data-view="tools">🧰 工具管理</li>
+            </ul>
+        </nav>
+
+        <!-- 右侧主内容区 -->
+        <main class="content" id="content-area">
+            <!-- 动态渲染 -->
+        </main>
+    </div>
+
+    <!-- 隐藏的上传 input -->
+    <input type="file" id="file-input" accept=".xlsx,.xlsm" hidden />
+
+    <!-- 导入测试集弹窗 -->
+    <div id="import-overlay" class="overlay hidden">
+        <div class="modal modal-wide">
+            <div class="modal-header">导入测试集</div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label class="form-label" for="import-file-input">导入框</label>
+                    <label class="btn btn-sm import-picker">
+                        <input type="file" id="import-file-input" accept=".xlsx,.xlsm" multiple hidden />
+                        选择测试集
+                    </label>
+                    <div id="import-file-list" class="import-file-list">
+                        <div class="import-empty">尚未选择测试集</div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label class="form-label" for="import-desc-input">说明</label>
+                    <textarea id="import-desc-input" class="input import-desc-input" placeholder="填写本批测试集的统一说明..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-import-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-import-save" class="btn btn-primary">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增工具弹窗 -->
+    <div id="tool-overlay" class="overlay hidden">
+        <div class="modal">
+            <div class="modal-header">新增工具</div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label class="form-label" for="tool-type-input">工具类型</label>
+                    <select id="tool-type-input" class="input">
+                        <option value="script">Script</option>
+                        <option value="agent">Agent</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label class="form-label" for="tool-name-input">名称</label>
+                    <input type="text" id="tool-name-input" class="input" placeholder="输入名称..." />
+                </div>
+                <div class="form-row">
+                    <label class="form-label" for="tool-desc-input">说明</label>
+                    <input type="text" id="tool-desc-input" class="input" placeholder="简要描述用途..." />
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-tool-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-tool-confirm" class="btn btn-primary">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 删除确认弹窗 -->
+    <div id="delete-overlay" class="overlay hidden">
+        <div class="modal modal-sm">
+            <div class="modal-header">确认删除</div>
+            <div class="modal-body">
+                <p>确定要删除选中的 <strong id="delete-count">0</strong> 个测试集吗？</p>
+                <p class="info-text" style="margin-top:8px">此操作不可恢复。</p>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-delete-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-delete-confirm" class="btn btn-danger">确定删除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/assets/codemirror-python.js?v=1"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
