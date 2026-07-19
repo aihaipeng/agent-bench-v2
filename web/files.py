@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path, PureWindowsPath
 
 from fastapi import HTTPException
@@ -63,3 +64,27 @@ def project_relative(path: Path) -> str:
         return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
     except ValueError:
         return str(path)
+
+
+def open_file_in_explorer(path: Path) -> str:
+    """在 Windows 资源管理器中打开文件所在目录并选中文件。"""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise HTTPException(404, f"文件不存在: {resolved.name}")
+    try:
+        subprocess.Popen(["explorer", "/select,", str(resolved)])
+    except Exception as exc:
+        raise HTTPException(500, "无法打开资源管理器") from exc
+    return str(resolved)
+
+
+def open_directory_in_explorer(path: Path) -> str:
+    """在 Windows 资源管理器中直接打开指定目录。"""
+    resolved = Path(path).resolve()
+    if not resolved.is_dir():
+        raise HTTPException(404, f"目录不存在: {resolved.name}")
+    try:
+        subprocess.Popen(["explorer", str(resolved)])
+    except Exception as exc:
+        raise HTTPException(500, "无法打开资源管理器") from exc
+    return str(resolved)

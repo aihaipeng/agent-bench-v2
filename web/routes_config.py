@@ -9,6 +9,8 @@ from web.files import PROJECT_ROOT, get_existing_input_path, get_input_path, pro
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_INPUT_PATH = "inputs/testcases.xlsx"
+DEFAULT_SHEET_NAME = "Sheet1"
 
 
 class CurrentConfigRequest(BaseModel):
@@ -35,7 +37,12 @@ def _load_yaml() -> dict:
         HTTPException: 配置文件不可读或格式错误。
     """
     if not CONFIG_PATH.is_file():
-        raise HTTPException(500, "config.yaml 不存在")
+        return {
+            "excel": {
+                "input_path": DEFAULT_INPUT_PATH,
+                "sheet_name": DEFAULT_SHEET_NAME,
+            }
+        }
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         raw = f.read()
     config = yaml.safe_load(raw)
@@ -71,12 +78,12 @@ def get_current_config() -> CurrentConfigResponse:
     """获取当前使用的测试集文件和 sheet 名。"""
     config = _load_yaml()
     excel = config.get("excel", {})
-    input_path = excel.get("input_path", "inputs/testcases.xlsx")
+    input_path = excel.get("input_path", DEFAULT_INPUT_PATH)
     try:
         filename = resolve_config_input_path(input_path).name
     except HTTPException:
         filename = Path(str(input_path)).name
-    sheet_name = excel.get("sheet_name", "Sheet1")
+    sheet_name = excel.get("sheet_name", DEFAULT_SHEET_NAME)
     return CurrentConfigResponse(filename=filename, sheet_name=sheet_name)
 
 

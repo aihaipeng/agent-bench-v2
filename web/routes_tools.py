@@ -2,30 +2,47 @@
 
 import json
 import time
-import traceback
-import builtins
 from datetime import datetime
-from io import StringIO
+from io import BytesIO
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
-from rich.console import Console
 
 from web.agent_runtime import (
     AgentTemplateError,
-    migrate_legacy_agent_template,
+    ExecutionAlreadyRunningError,
+    find_agent_template_parameters,
+    interrupt_python_run,
     run_agent_python,
+    run_script_python,
+    stream_agent_python,
+    stream_script_python,
 )
-from web.files import INPUTS_DIR
+from web.files import open_directory_in_explorer
+from web.run_stream import RunStreamError, RunStreamManager
+from web.tool_registry import (
+    MAIN_FILENAME,
+    MANIFEST_FILENAME,
+    SCHEMA_VERSION,
+    ToolRegistry,
+    ToolRegistryError,
+    manifest_from_record,
+    parse_tool_package,
+)
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
-TOOLS_FILE = INPUTS_DIR / ".tools.json"
 TOOL_TYPES = {"script", "agent"}
 AGENT_TEMPLATE_VERSION = 3
+TOOL_REGISTRY_ROOT = Path(__file__).resolve().parent.parent / "tool_registry"
+_registry_instance: ToolRegistry | None = None
+_registry_root: Path | None = None
+_run_stream_manager = RunStreamManager()
 DEFAULT_AGENT_PYTHON_CODE = '''from langchain.chat_models import init_chat_model
 from langchain.agents import create_agent
 from rich import print
@@ -42,6 +59,19 @@ agent = create_agent(
     system_prompt=${system_prompt},
 )
 
+# 流式输出
+# for chunk, _ in agent.stream(
+#     {
+#         "messages": [
+#             {"role": "user", "content": ${human_message}},
+#         ]
+#     },
+#     stream_mode="messages",
+# ):
+#     if isinstance(chunk.content, str):
+#         print(chunk.content, end="", flush=True)
+
+# 阻塞式输出
 response = agent.invoke({
     "messages": [
         {"role": "user", "content": ${human_message}},
@@ -50,53 +80,6 @@ response = agent.invoke({
 
 print(response)
 '''
-SAFE_BUILTINS = {
-    name: getattr(builtins, name)
-    for name in (
-        "abs",
-        "all",
-        "any",
-        "bool",
-        "callable",
-        "dict",
-        "enumerate",
-        "Exception",
-        "filter",
-        "float",
-        "getattr",
-        "hasattr",
-        "int",
-        "isinstance",
-        "issubclass",
-        "len",
-        "list",
-        "map",
-        "max",
-        "min",
-        "next",
-        "object",
-        "range",
-        "repr",
-        "reversed",
-        "round",
-        "RuntimeError",
-        "set",
-        "setattr",
-        "slice",
-        "sorted",
-        "str",
-        "sum",
-        "super",
-        "tuple",
-        "TypeError",
-        "type",
-        "ValueError",
-        "zip",
-        "__build_class__",
-    )
-}
-
-
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -114,133 +97,65 @@ def _normalize_text(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _new_output() -> tuple[StringIO, Console, Any]:
-    """创建请求私有日志缓冲区，避免 redirect_stdout 导致并发串日志。"""
-    output = StringIO()
-    console = Console(file=output, force_terminal=False, color_system=None, width=140)
+def _get_registry() -> ToolRegistry:
+    """返回当前配置目录对应的仓储，便于测试切换临时目录。"""
+    global _registry_instance, _registry_root
+    root = Path(TOOL_REGISTRY_ROOT).resolve()
+    if _registry_instance is None or _registry_root != root:
+        _registry_instance = ToolRegistry(root)
+        _registry_root = root
+    return _registry_instance
 
-    def output_print(*values: Any, sep: str = " ", end: str = "\n", **_: Any) -> None:
-        output.write(sep.join(str(value) for value in values) + end)
 
-    return output, console, output_print
-
-
-def _restricted_globals(output_print: Any, values: dict[str, Any] | None = None) -> dict[str, Any]:
-    """提供受限执行命名空间；用于降低误操作风险，不作为强安全沙箱。"""
-    result: dict[str, Any] = {
-        "__builtins__": {**SAFE_BUILTINS, "print": output_print},
-        "__name__": "__tool_runtime__",
-        "print": output_print,
+def _to_api_tool(raw: dict) -> dict:
+    """将统一文件结构转换为现有页面使用的扁平字段。"""
+    parameters = raw.get("parameters", {})
+    is_agent = raw["type"] == "agent"
+    return {
+        "id": raw["id"],
+        "type": raw["type"],
+        "name": raw["name"],
+        "description": raw.get("description", ""),
+        "output_example": raw.get("output_example"),
+        "output_example_configured": raw.get("output_example_configured", False),
+        "model_provider": parameters.get("model_provider", "") if is_agent else "",
+        "api_key": parameters.get("api_key", "") if is_agent else "",
+        "base_url": parameters.get("base_url", "") if is_agent else "",
+        "model": parameters.get("model", "") if is_agent else "",
+        "system_prompt": parameters.get("system_prompt", "") if is_agent else "",
+        "human_message": parameters.get("human_message", "") if is_agent else "",
+        "python_code": raw.get("code", "") if is_agent else "",
+        "needs_review": False,
+        "agent_template_version": AGENT_TEMPLATE_VERSION,
+        "script_code": raw.get("code", "") if not is_agent else "",
+        "created_at": raw.get("created_at", ""),
+        "updated_at": raw.get("updated_at", ""),
     }
-    if values:
-        result.update(values)
-    return result
-
-
-def _read_tools_file() -> dict:
-    if not TOOLS_FILE.is_file():
-        return {"tools": []}
-    try:
-        with open(TOOLS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"tools": []}
-    if not isinstance(data, dict) or not isinstance(data.get("tools"), list):
-        return {"tools": []}
-    return data
-
-
-def _save_tools_file(data: dict) -> None:
-    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    with open(TOOLS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _load_tools() -> list[dict]:
-    file_data = _read_tools_file()
-    result: list[dict] = []
-    migrated = False
-    for raw in file_data.get("tools", []):
-        if not isinstance(raw, dict):
-            continue
-        try:
-            tool_type = _normalize_tool_type(str(raw.get("type", "")))
-        except HTTPException:
-            continue
-        tool_id = _normalize_text(str(raw.get("id", "")))
-        name = _normalize_text(str(raw.get("name", "")))
-        if not tool_id or not name:
-            continue
-        script_code = str(raw.get("script_code") or "")
-        if not script_code and tool_type == "script":
-            script_code = str(raw.get("content") or "")
-        prompt = str(raw.get("prompt") or "")
-        if not prompt and tool_type == "agent":
-            prompt = str(raw.get("content") or "")
-        python_code = str(raw.get("python_code") or "")
-        needs_review = bool(raw.get("needs_review", False))
-        agent_template_version = raw.get("agent_template_version")
-        if tool_type == "agent":
-            if agent_template_version == 2 and python_code:
-                python_code = migrate_legacy_agent_template(python_code)
-            elif agent_template_version != AGENT_TEMPLATE_VERSION:
-                python_code = DEFAULT_AGENT_PYTHON_CODE
-            if not python_code:
-                python_code = DEFAULT_AGENT_PYTHON_CODE
-            if (
-                raw.get("python_code") != python_code
-                or agent_template_version != AGENT_TEMPLATE_VERSION
-            ):
-                raw["python_code"] = python_code
-                raw["agent_template_version"] = AGENT_TEMPLATE_VERSION
-                migrated = True
-            needs_review = False
-        human_message = raw.get("human_message")
-        if human_message is None:
-            human_message = "你好，请介绍一下自己。"
-        result.append(
-            {
-                "id": tool_id,
-                "type": tool_type,
-                "name": name,
-                "description": _normalize_text(raw.get("description")),
-                "model_provider": _normalize_text(raw.get("model_provider")),
-                "api_key": _normalize_text(raw.get("api_key") or raw.get("llm_api_key")),
-                "base_url": _normalize_text(raw.get("base_url") or raw.get("llm_endpoint")),
-                "model": _normalize_text(raw.get("model") or raw.get("llm_model")),
-                "system_prompt": _normalize_text(raw.get("system_prompt") or prompt),
-                "human_message": str(human_message),
-                "python_code": python_code,
-                "needs_review": needs_review,
-                "agent_template_version": AGENT_TEMPLATE_VERSION,
-                "script_code": script_code,
-                "created_at": str(raw.get("created_at") or ""),
-                "updated_at": str(raw.get("updated_at") or ""),
-            }
-        )
-    if migrated:
-        _save_tools_file(file_data)
-    return result
+    return [_to_api_tool(tool) for tool in _get_registry().list_tools()]
 
 
-def _save_tools(tools: list[dict]) -> None:
-    _save_tools_file({"tools": tools})
+def _get_raw_tool(tool_id: str) -> dict:
+    tool = _get_registry().get_tool(tool_id)
+    if tool is None:
+        raise HTTPException(404, f"工具不存在: {tool_id}")
+    return tool
 
 
-def _find_tool(tools: list[dict], tool_id: str) -> dict:
-    for tool in tools:
-        if tool["id"] == tool_id:
-            return tool
-    raise HTTPException(404, f"工具不存在: {tool_id}")
+def _save_new_tool(raw: dict) -> dict:
+    try:
+        return _get_registry().create_tool(raw)
+    except ToolRegistryError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
-def _ensure_unique_tool_name(tools: list[dict], name: str, exclude_id: str | None = None) -> None:
-    """确保工具名称在工具列表内唯一。"""
-    for tool in tools:
-        if exclude_id and tool["id"] == exclude_id:
-            continue
-        if tool["name"] == name:
-            raise HTTPException(400, "名称不可重复")
+def _save_existing_tool(tool_id: str, raw: dict) -> dict:
+    try:
+        return _get_registry().update_tool(tool_id, raw)
+    except ToolRegistryError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 class ToolCreateRequest(BaseModel):
@@ -273,6 +188,12 @@ class ToolMetadataUpdateRequest(BaseModel):
     description: str | None = None
 
 
+class ToolOutputExampleRequest(BaseModel):
+    """设置 Parser 字段树使用的 JSON 输出示例。"""
+
+    output_example: Any
+
+
 class AgentRunRequest(BaseModel):
     """使用编辑页当前参数运行 Agent Python 代码。"""
 
@@ -283,12 +204,14 @@ class AgentRunRequest(BaseModel):
     system_prompt: str = ""
     human_message: str = ""
     python_code: str = ""
+    run_id: str = ""
 
 
 class ScriptRunRequest(BaseModel):
     """运行 Script 工具时传入的请求体。"""
 
     script_code: str = ""
+    run_id: str = ""
 
 
 def _required_agent_values(body: ToolUpdateRequest | AgentRunRequest) -> dict[str, str]:
@@ -302,10 +225,11 @@ def _required_agent_values(body: ToolUpdateRequest | AgentRunRequest) -> dict[st
 
 
 def _validate_required_agent_values(body: ToolUpdateRequest | AgentRunRequest) -> None:
+    referenced = find_agent_template_parameters(body.python_code)
     missing = [
         field
         for field, value in _required_agent_values(body).items()
-        if not _normalize_text(value)
+        if field in referenced and not _normalize_text(value)
     ]
     if missing:
         raise HTTPException(400, f"Agent 必填参数不能为空: {', '.join(missing)}")
@@ -340,40 +264,207 @@ def create_tool(body: ToolCreateRequest) -> JSONResponse:
     name = _normalize_text(body.name)
     if not name:
         raise HTTPException(400, "名称不能为空")
-    tools = _load_tools()
-    _ensure_unique_tool_name(tools, name)
 
     tool_type = _normalize_tool_type(body.type)
     now = _now_iso()
-    tool = {
+    raw = {
+        "schema_version": SCHEMA_VERSION,
         "id": uuid4().hex,
         "type": tool_type,
         "name": name,
         "description": _normalize_text(body.description),
-        # LLM 参数
-        "model_provider": "",
-        "api_key": "",
-        "base_url": "",
-        "model": "",
-        "system_prompt": "",
-        "human_message": "你好，请介绍一下自己。",
-        "python_code": DEFAULT_AGENT_PYTHON_CODE if tool_type == "agent" else "",
-        "needs_review": False,
-        "agent_template_version": AGENT_TEMPLATE_VERSION,
-        "script_code": "",
+        "code": DEFAULT_AGENT_PYTHON_CODE if tool_type == "agent" else "",
+        "parameters": (
+            {
+                "model": "",
+                "model_provider": "",
+                "api_key": "",
+                "base_url": "",
+                "system_prompt": "",
+                "human_message": "你好，请介绍一下自己。",
+            }
+            if tool_type == "agent"
+            else {}
+        ),
         "created_at": now,
         "updated_at": now,
     }
-    tools.append(tool)
-    _save_tools(tools)
-    return JSONResponse({"tool": tool})
+    return JSONResponse({"tool": _to_api_tool(_save_new_tool(raw))})
+
+
+def get_tool_registry() -> ToolRegistry:
+    """供 Workflow 服务读取与工具管理页相同的显式刷新快照。"""
+    return _get_registry()
+
+
+@router.post("/refresh")
+def refresh_tools() -> JSONResponse:
+    """显式重读项目目录，并返回所有跳过文件的原因。"""
+    result = _get_registry().refresh()
+    return JSONResponse(
+        {
+            "loaded": result.loaded,
+            "errors": [
+                {"file": item.file, "error": item.error} for item in result.errors
+            ],
+        }
+    )
+
+
+@router.post("/import")
+async def import_tools(files: list[UploadFile] = File(...)) -> JSONResponse:
+    """逐个解析一个或多个 ZIP 工具包，同 ID 工具直接拒绝。"""
+    imported: list[dict] = []
+    errors: list[dict] = []
+    for upload in files:
+        filename = upload.filename or "未命名文件"
+        if not filename.lower().endswith(".zip"):
+            errors.append({"file": filename, "error": "仅支持 .zip 文件"})
+            continue
+        try:
+            tools = _read_tool_archive(await upload.read())
+        except ToolRegistryError as exc:
+            errors.append({"file": filename, "error": str(exc)})
+            continue
+        for raw in tools:
+            try:
+                saved = _get_registry().create_tool(raw)
+            except ToolRegistryError as exc:
+                errors.append(
+                    {"file": f"{filename}/{raw['id']}", "error": str(exc)}
+                )
+                continue
+            imported.append({"file": filename, "tool": _to_api_tool(saved)})
+    return JSONResponse({"imported": imported, "errors": errors})
+
+
+def _read_tool_archive(content: bytes) -> list[dict]:
+    """读取统一 ZIP 结构，并在写入仓储前完成整包结构校验。"""
+    try:
+        archive = ZipFile(BytesIO(content))
+    except BadZipFile as exc:
+        raise ToolRegistryError("ZIP 文件损坏或格式无效") from exc
+
+    packages: dict[str, dict[str, object]] = {}
+    seen_paths: set[str] = set()
+    try:
+        with archive:
+            for info in archive.infolist():
+                raw_name = info.filename
+                if "\\" in raw_name:
+                    raise ToolRegistryError(f"ZIP 路径必须使用正斜杠: {raw_name}")
+                path = PurePosixPath(raw_name)
+                if path.is_absolute() or ".." in path.parts:
+                    raise ToolRegistryError(f"ZIP 包含不安全路径: {raw_name}")
+                if info.is_dir():
+                    if len(path.parts) != 1:
+                        raise ToolRegistryError(f"ZIP 包含无效目录: {raw_name}")
+                    continue
+                if raw_name in seen_paths:
+                    raise ToolRegistryError(f"ZIP 包含重复文件: {raw_name}")
+                seen_paths.add(raw_name)
+                if len(path.parts) != 2 or path.name not in {
+                    MANIFEST_FILENAME,
+                    MAIN_FILENAME,
+                }:
+                    raise ToolRegistryError(f"ZIP 包含无效文件路径: {raw_name}")
+                tool_id = path.parts[0]
+                package = packages.setdefault(tool_id, {})
+                package[path.name] = info
+
+            if not packages:
+                raise ToolRegistryError("ZIP 中没有工具目录")
+
+            records: list[dict] = []
+            for tool_id, package in packages.items():
+                missing = {
+                    MANIFEST_FILENAME,
+                    MAIN_FILENAME,
+                } - set(package)
+                if missing:
+                    raise ToolRegistryError(
+                        f"工具 {tool_id} 缺少文件: {', '.join(sorted(missing))}"
+                    )
+                try:
+                    manifest_content = archive.read(
+                        package[MANIFEST_FILENAME]
+                    ).decode("utf-8-sig")
+                    code = archive.read(package[MAIN_FILENAME]).decode("utf-8")
+                except (OSError, RuntimeError, UnicodeError) as exc:
+                    raise ToolRegistryError(f"工具 {tool_id} 读取失败: {exc}") from exc
+                record = parse_tool_package(
+                    manifest_content,
+                    code,
+                    expected_id=tool_id,
+                )
+                records.append(record.model_dump())
+            return records
+    except ToolRegistryError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ToolRegistryError(f"ZIP 读取失败: {exc}") from exc
+
+
+def _build_tool_archive(tools: list[dict]) -> bytes:
+    """将一个或多个工具写为统一的 ID 子目录 ZIP。"""
+    archive = BytesIO()
+    with ZipFile(archive, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        for tool in tools:
+            manifest = manifest_from_record(tool)
+            zip_file.writestr(
+                f"{tool['id']}/{MANIFEST_FILENAME}",
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+            zip_file.writestr(f"{tool['id']}/{MAIN_FILENAME}", tool.get("code", ""))
+    return archive.getvalue()
+
+
+@router.get("/export")
+def export_tools(ids: list[str] = Query(default=[])) -> Response:
+    """将所选工具或全部工具打包为统一目录结构 ZIP。"""
+    if ids:
+        tools = [_get_raw_tool(tool_id) for tool_id in dict.fromkeys(ids)]
+    else:
+        tools = _get_registry().list_tools()
+    if not tools:
+        raise HTTPException(400, "没有可导出的工具")
+
+    filename = f"tools-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    return Response(
+        content=_build_tool_archive(tools),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{tool_id}")
 def get_tool(tool_id: str) -> JSONResponse:
     """查看一个测试工具。"""
-    tool = _find_tool(_load_tools(), tool_id)
-    return JSONResponse({"tool": tool})
+    return JSONResponse({"tool": _to_api_tool(_get_raw_tool(tool_id))})
+
+
+@router.get("/{tool_id}/export")
+def export_tool(tool_id: str) -> Response:
+    """将单个工具导出为 ZIP，包括 manifest 中保存的密钥。"""
+    raw = _get_raw_tool(tool_id)
+    return Response(
+        content=_build_tool_archive([raw]),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{tool_id}.zip"'
+        },
+    )
+
+
+@router.post("/{tool_id}/open-dir")
+def open_tool_dir(tool_id: str) -> JSONResponse:
+    """在 Windows 资源管理器中直接打开指定工具目录。"""
+    _get_raw_tool(tool_id)
+    path = _get_registry().get_tool_directory(tool_id)
+    if path is None:
+        raise HTTPException(404, f"工具不存在: {tool_id}")
+    abs_path = open_directory_in_explorer(path)
+    return JSONResponse({"ok": True, "path": abs_path})
 
 
 @router.put("/{tool_id}")
@@ -383,39 +474,24 @@ def update_tool(tool_id: str, body: ToolUpdateRequest) -> JSONResponse:
     if not name:
         raise HTTPException(400, "名称不能为空")
 
-    tools = _load_tools()
-    tool = _find_tool(tools, tool_id)
-    _ensure_unique_tool_name(tools, name, exclude_id=tool_id)
-    if tool["type"] == "agent":
-        _validate_required_agent_values(body)
-        if not body.python_code.strip():
-            raise HTTPException(400, "Python 代码不能为空")
-    tool["name"] = name
-    tool["description"] = _normalize_text(body.description)
-    tool["model"] = _normalize_text(body.model)
-    tool["model_provider"] = _normalize_text(body.model_provider)
-    tool["api_key"] = _normalize_text(body.api_key)
-    tool["base_url"] = _normalize_text(body.base_url)
-    tool["system_prompt"] = body.system_prompt or ""
-    tool["human_message"] = body.human_message.strip()
-    tool["python_code"] = body.python_code
-    tool["needs_review"] = False
-    tool["agent_template_version"] = AGENT_TEMPLATE_VERSION
-    tool["script_code"] = body.script_code or ""
-    for legacy_field in (
-        "temperature",
-        "extra_body",
-        "max_tokens",
-        "request_timeout",
-        "prompt",
-        "additional_components",
-        "additional_components_enabled",
-        "execution_mode",
-    ):
-        tool.pop(legacy_field, None)
-    tool["updated_at"] = _now_iso()
-    _save_tools(tools)
-    return JSONResponse({"tool": tool})
+    raw = _get_raw_tool(tool_id)
+    raw["name"] = name
+    raw["description"] = _normalize_text(body.description)
+    raw["updated_at"] = _now_iso()
+    if raw["type"] == "agent":
+        raw["code"] = body.python_code
+        raw["parameters"] = {
+            "model": _normalize_text(body.model),
+            "model_provider": _normalize_text(body.model_provider),
+            "api_key": _normalize_text(body.api_key),
+            "base_url": _normalize_text(body.base_url),
+            "system_prompt": body.system_prompt or "",
+            "human_message": body.human_message.strip(),
+        }
+    else:
+        raw["code"] = body.script_code or ""
+        raw["parameters"] = {}
+    return JSONResponse({"tool": _to_api_tool(_save_existing_tool(tool_id, raw))})
 
 
 @router.patch("/{tool_id}")
@@ -423,25 +499,45 @@ def update_tool_metadata(tool_id: str, body: ToolMetadataUpdateRequest) -> JSONR
     """局部更新名称或说明，不覆盖 Agent/Script 的其他配置。"""
     if body.name is None and body.description is None:
         raise HTTPException(400, "至少需要提供名称或说明")
-    tools = _load_tools()
-    tool = _find_tool(tools, tool_id)
+    raw = _get_raw_tool(tool_id)
     if body.name is not None:
         name = _normalize_text(body.name)
         if not name:
             raise HTTPException(400, "名称不能为空")
-        _ensure_unique_tool_name(tools, name, exclude_id=tool_id)
-        tool["name"] = name
+        raw["name"] = name
     if body.description is not None:
-        tool["description"] = _normalize_text(body.description)
-    tool["updated_at"] = _now_iso()
-    _save_tools(tools)
-    return JSONResponse({"tool": tool})
+        raw["description"] = _normalize_text(body.description)
+    raw["updated_at"] = _now_iso()
+    return JSONResponse({"tool": _to_api_tool(_save_existing_tool(tool_id, raw))})
+
+
+@router.put("/{tool_id}/output-example")
+def update_tool_output_example(
+    tool_id: str,
+    body: ToolOutputExampleRequest,
+) -> JSONResponse:
+    """保存 Parser 声明使用的任意 JSON 输出示例。"""
+    raw = _get_raw_tool(tool_id)
+    raw["output_example"] = body.output_example
+    raw["output_example_configured"] = True
+    raw["updated_at"] = _now_iso()
+    return JSONResponse({"tool": _to_api_tool(_save_existing_tool(tool_id, raw))})
+
+
+@router.delete("/{tool_id}/output-example")
+def delete_tool_output_example(tool_id: str) -> JSONResponse:
+    """清除工具的 Parser 输出示例声明。"""
+    raw = _get_raw_tool(tool_id)
+    raw["output_example"] = None
+    raw["output_example_configured"] = False
+    raw["updated_at"] = _now_iso()
+    return JSONResponse({"tool": _to_api_tool(_save_existing_tool(tool_id, raw))})
 
 
 @router.post("/{tool_id}/test")
 def test_agent(tool_id: str, body: AgentRunRequest) -> JSONResponse:
     """在独立子进程中编译并运行 Agent Python 代码。"""
-    tool = _find_tool(_load_tools(), tool_id)
+    tool = _to_api_tool(_get_raw_tool(tool_id))
     if tool["type"] != "agent":
         raise HTTPException(400, "仅 Agent 工具支持测试")
     _validate_required_agent_values(body)
@@ -458,43 +554,172 @@ def test_agent(tool_id: str, body: AgentRunRequest) -> JSONResponse:
     }
     started_at = time.perf_counter()
     try:
-        result = run_agent_python(body.python_code, parameters)
+        run_id = _normalize_text(body.run_id)
+        result = (
+            run_agent_python(body.python_code, parameters, run_id=run_id)
+            if run_id
+            else run_agent_python(body.python_code, parameters)
+        )
     except AgentTemplateError as exc:
         result = {"ok": False, "logs": f"Agent 模板编译失败: {exc}\n"}
+    except ExecutionAlreadyRunningError as exc:
+        raise HTTPException(409, str(exc)) from exc
     result["latency_ms"] = round((time.perf_counter() - started_at) * 1000, 1)
     return JSONResponse(result)
 
 
 @router.post("/{tool_id}/run")
 def run_script(tool_id: str, body: ScriptRunRequest) -> JSONResponse:
-    """在受限环境中执行 Script 工具的代码，返回 stdout 输出或错误。"""
-    tool = _find_tool(_load_tools(), tool_id)
+    """在独立子进程中运行 Script Python 代码。"""
+    tool = _to_api_tool(_get_raw_tool(tool_id))
     if tool["type"] != "script":
         raise HTTPException(400, "仅 Script 工具支持运行")
 
-    script_code = (body.script_code or "").strip()
-    if not script_code:
+    if not body.script_code.strip():
         raise HTTPException(400, "脚本代码不能为空")
 
-    output, console, output_print = _new_output()
+    started_at = time.perf_counter()
+    run_id = _normalize_text(body.run_id)
     try:
-        exec(script_code, _restricted_globals(output_print))
-        return JSONResponse({"ok": True, "logs": output.getvalue()})
-    except Exception as exc:  # noqa: BLE001 - 运行接口需要把完整异常写入日志区
-        console.print("[bold red]Script 运行失败[/bold red]")
-        console.print(f"[bold red]错误类型: {type(exc).__name__}[/bold red]")
-        console.print(f"[bold red]错误信息: {exc}[/bold red]")
-        console.print()
-        console.print("[bold yellow]完整 Traceback:[/bold yellow]")
-        console.print(traceback.format_exc())
-        return JSONResponse({"ok": False, "logs": output.getvalue()})
+        result = (
+            run_script_python(body.script_code, run_id=run_id)
+            if run_id
+            else run_script_python(body.script_code)
+        )
+    except ExecutionAlreadyRunningError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result["latency_ms"] = round((time.perf_counter() - started_at) * 1000, 1)
+    return JSONResponse(result)
+
+
+@router.post("/{tool_id}/test/start", status_code=202)
+def start_agent_stream(tool_id: str, body: AgentRunRequest) -> JSONResponse:
+    """启动 Agent Worker，并立即返回用于订阅日志的 run_id。"""
+    tool = _to_api_tool(_get_raw_tool(tool_id))
+    if tool["type"] != "agent":
+        raise HTTPException(400, "仅 Agent 工具支持测试")
+    _validate_required_agent_values(body)
+    if not body.python_code.strip():
+        raise HTTPException(400, "Python 代码不能为空")
+
+    run_id = _normalize_text(body.run_id) or uuid4().hex
+    parameters = {
+        "model": _normalize_text(body.model),
+        "model_provider": _normalize_text(body.model_provider),
+        "api_key": _normalize_text(body.api_key),
+        "base_url": _normalize_text(body.base_url),
+        "system_prompt": body.system_prompt,
+        "human_message": body.human_message.strip(),
+    }
+
+    def runner(on_log):
+        try:
+            return stream_agent_python(
+                body.python_code,
+                parameters,
+                on_log,
+                run_id,
+            )
+        except AgentTemplateError as exc:
+            on_log(f"Agent 模板编译失败: {exc}\n")
+            return {"ok": False}
+
+    try:
+        _run_stream_manager.start(run_id, runner)
+    except RunStreamError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return JSONResponse({"ok": True, "run_id": run_id}, status_code=202)
+
+
+@router.post("/{tool_id}/run/start", status_code=202)
+def start_script_stream(tool_id: str, body: ScriptRunRequest) -> JSONResponse:
+    """启动 Script Worker，并立即返回用于订阅日志的 run_id。"""
+    tool = _to_api_tool(_get_raw_tool(tool_id))
+    if tool["type"] != "script":
+        raise HTTPException(400, "仅 Script 工具支持运行")
+    if not body.script_code.strip():
+        raise HTTPException(400, "脚本代码不能为空")
+
+    run_id = _normalize_text(body.run_id) or uuid4().hex
+
+    def runner(on_log):
+        return stream_script_python(
+            body.script_code,
+            on_log,
+            run_id,
+        )
+
+    try:
+        _run_stream_manager.start(run_id, runner)
+    except RunStreamError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return JSONResponse({"ok": True, "run_id": run_id}, status_code=202)
+
+
+def _encode_sse_event(event: dict) -> str:
+    event_type = str(event.get("type") or "message")
+    payload = (
+        {"text": event.get("text", "")}
+        if event_type == "log"
+        else event.get("result", {})
+    )
+    return (
+        f"event: {event_type}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    )
+
+
+@router.get("/runs/{run_id}/events")
+def stream_run_events(run_id: str) -> StreamingResponse:
+    """以 SSE 顺序推送一次运行的日志和最终结果。"""
+    normalized = _normalize_text(run_id)
+    if not normalized or _run_stream_manager.get(normalized) is None:
+        raise HTTPException(404, f"运行任务不存在: {normalized or run_id}")
+
+    def event_source():
+        try:
+            for event in _run_stream_manager.iter_events(normalized):
+                yield ": keepalive\n\n" if event is None else _encode_sse_event(event)
+        except RunStreamError as exc:
+            yield _encode_sse_event(
+                {
+                    "type": "complete",
+                    "result": {"ok": False, "error": str(exc)},
+                }
+            )
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/runs/{run_id}/interrupt")
+def interrupt_run(run_id: str) -> JSONResponse:
+    """立即终止指定运行任务及其派生子进程。"""
+    normalized = _normalize_text(run_id)
+    if not normalized:
+        raise HTTPException(400, "run_id 不能为空")
+    terminated = interrupt_python_run(normalized)
+    return JSONResponse(
+        {
+            "ok": True,
+            "run_id": normalized,
+            "process_terminated": terminated,
+        }
+    )
 
 
 @router.delete("/{tool_id}")
 def delete_tool(tool_id: str) -> JSONResponse:
     """删除一个测试工具。"""
-    tools = _load_tools()
-    tool = _find_tool(tools, tool_id)
-    tools = [item for item in tools if item["id"] != tool_id]
-    _save_tools(tools)
+    tool = _get_raw_tool(tool_id)
+    try:
+        _get_registry().delete_tool(tool_id)
+    except ToolRegistryError as exc:
+        raise HTTPException(500, str(exc)) from exc
     return JSONResponse({"ok": True, "tool_id": tool_id, "name": tool["name"]})

@@ -19,6 +19,37 @@ class TestCase:
 
     case_id: str
     question: str
+    row_number: int
+
+
+def read_test_cases_from_sheet(sheet) -> list[TestCase]:
+    """从一个已打开的工作表读取有效用例并保留 Excel 行号。"""
+    rows = sheet.iter_rows(min_col=1, max_col=2, values_only=True)
+    testcases: list[TestCase] = []
+    seen_ids: set[str] = set()
+    for row_number, row in enumerate(rows, start=1):
+        values = list(row) + [None] * (2 - len(row))
+        case_id = _as_text(values[0])
+        question = _as_text(values[1])
+
+        if row_number == 1 and (
+            case_id.casefold() in CASE_ID_HEADERS
+            or question.casefold() in QUESTION_HEADERS
+        ):
+            continue
+        if not case_id or not question:
+            continue
+        if case_id in seen_ids:
+            continue
+        seen_ids.add(case_id)
+        testcases.append(
+            TestCase(
+                case_id=case_id,
+                question=question,
+                row_number=row_number,
+            )
+        )
+    return testcases
 
 
 class ExcelCaseRepository:
@@ -51,26 +82,6 @@ class ExcelCaseRepository:
         workbook = load_workbook(self.path, read_only=True, data_only=True)
         try:
             sheet = self._select_sheet(workbook)
-            rows = list(sheet.iter_rows(min_col=1, max_col=2, values_only=True))
+            return read_test_cases_from_sheet(sheet)
         finally:
             workbook.close()
-
-        testcases: list[TestCase] = []
-        seen_ids: set[str] = set()
-        for row_number, row in enumerate(rows, start=1):
-            values = list(row) + [None] * (2 - len(row))
-            case_id = _as_text(values[0])
-            question = _as_text(values[1])
-
-            if row_number == 1 and (
-                case_id.casefold() in CASE_ID_HEADERS
-                or question.casefold() in QUESTION_HEADERS
-            ):
-                continue
-            if not case_id or not question:
-                continue
-            if case_id in seen_ids:
-                continue
-            seen_ids.add(case_id)
-            testcases.append(TestCase(case_id=case_id, question=question))
-        return testcases

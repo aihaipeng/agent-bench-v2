@@ -1,19 +1,15 @@
-import json
-
 from fastapi.testclient import TestClient
 
-from web import files, routes_tools
+from web import routes_tools
 from web.app import app
 
 
 def _patch_tools_storage(tmp_path, monkeypatch):
-    inputs_dir = tmp_path / "inputs"
-    inputs_dir.mkdir()
-    tools_file = inputs_dir / ".tools.json"
-    monkeypatch.setattr(files, "INPUTS_DIR", inputs_dir)
-    monkeypatch.setattr(routes_tools, "INPUTS_DIR", inputs_dir)
-    monkeypatch.setattr(routes_tools, "TOOLS_FILE", tools_file)
-    return tools_file
+    registry_root = tmp_path / "tool_registry"
+    monkeypatch.setattr(routes_tools, "TOOL_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(routes_tools, "_registry_instance", None)
+    monkeypatch.setattr(routes_tools, "_registry_root", None)
+    return registry_root
 
 
 def _agent_body(**overrides):
@@ -33,7 +29,7 @@ def _agent_body(**overrides):
 
 
 def test_create_filter_and_sort_tools(tmp_path, monkeypatch):
-    tools_file = _patch_tools_storage(tmp_path, monkeypatch)
+    registry_root = _patch_tools_storage(tmp_path, monkeypatch)
     client = TestClient(app)
     script = client.post(
         "/api/tools",
@@ -46,7 +42,15 @@ def test_create_filter_and_sort_tools(tmp_path, monkeypatch):
 
     assert script.status_code == 200
     assert agent.status_code == 200
-    assert tools_file.is_file()
+    stored_directories = [path for path in registry_root.iterdir() if path.is_dir()]
+    assert len(stored_directories) == 2
+    assert {path.name for path in stored_directories} == {
+        script.json()["tool"]["id"],
+        agent.json()["tool"]["id"],
+    }
+    for directory in stored_directories:
+        assert (directory / "manifest.json").is_file()
+        assert (directory / "main.py").is_file()
     filtered = client.get("/api/tools", params={"type": "script", "q": "报告"})
     assert [tool["name"] for tool in filtered.json()["tools"]] == ["B 报告"]
     sorted_tools = client.get(
@@ -58,7 +62,7 @@ def test_create_filter_and_sort_tools(tmp_path, monkeypatch):
     ]
 
 
-def test_tool_name_must_be_unique(tmp_path, monkeypatch):
+def test_tool_names_may_repeat_and_ids_remain_distinct(tmp_path, monkeypatch):
     _patch_tools_storage(tmp_path, monkeypatch)
     client = TestClient(app)
     first = client.post(
@@ -79,9 +83,13 @@ def test_tool_name_must_be_unique(tmp_path, monkeypatch):
         json={"name": "唯一名称", "description": "", "script_code": "print('ok')"},
     )
 
-    assert duplicate_create.status_code == 400
-    assert duplicate_update.status_code == 400
+    assert duplicate_create.status_code == 200
+    assert duplicate_update.status_code == 200
     assert same_name.status_code == 200
+    tools = client.get("/api/tools").json()["tools"]
+    same_names = [tool for tool in tools if tool["name"] == "唯一名称"]
+    assert len(same_names) == 3
+    assert len({tool["id"] for tool in same_names}) == 3
 
 
 def test_update_agent_and_script_fields(tmp_path, monkeypatch):
@@ -117,31 +125,112 @@ def test_update_agent_and_script_fields(tmp_path, monkeypatch):
     assert script_response.json()["tool"]["script_code"] == "print('ok')"
 
 
-def test_agent_update_requires_five_parameters_and_python_code(tmp_path, monkeypatch):
+def test_agent_update_only_requires_a_name(tmp_path, monkeypatch):
+    _patch_tools_storage(tmp_path, monkeypatch)
+    client = TestClient(app)
+    agent = client.post(
+        "/api/tools", json={"type": "agent", "name": "Draft", "description": ""}
+    ).json()["tool"]
+
+    draft = client.put(
+        f"/api/tools/{agent['id']}",
+        json=_agent_body(
+            name="Saved Draft",
+            model="",
+            model_provider="",
+            api_key="",
+            base_url="",
+            system_prompt="",
+            human_message="",
+            python_code="",
+        ),
+    )
+    placeholder_draft = client.put(
+        f"/api/tools/{agent['id']}",
+        json=_agent_body(
+            name="Saved Draft",
+            model="",
+            model_provider="",
+            api_key="",
+            base_url="",
+            human_message="",
+            python_code="response = [${model}, ${api_key}]",
+        ),
+    )
+    empty_name = client.put(
+        f"/api/tools/{agent['id']}", json=_agent_body(name="   ", python_code="")
+    )
+
+    assert draft.status_code == 200
+    saved = draft.json()["tool"]
+    assert saved["name"] == "Saved Draft"
+    for field in (
+        "model",
+        "model_provider",
+        "api_key",
+        "base_url",
+        "system_prompt",
+        "human_message",
+        "python_code",
+    ):
+        assert saved[field] == ""
+    assert placeholder_draft.status_code == 200
+    assert empty_name.status_code == 400
+    assert empty_name.json()["detail"] == "名称不能为空"
+
+
+def test_agent_run_requires_python_code_and_referenced_parameters(tmp_path, monkeypatch):
     _patch_tools_storage(tmp_path, monkeypatch)
     client = TestClient(app)
     agent = client.post(
         "/api/tools", json={"type": "agent", "name": "Required", "description": ""}
     ).json()["tool"]
 
-    missing = client.put(
-        f"/api/tools/{agent['id']}",
+    missing = client.post(
+        f"/api/tools/{agent['id']}/test",
         json=_agent_body(
-            model="", model_provider="", api_key="", base_url="", human_message=""
+            model="",
+            model_provider="",
+            api_key="",
+            base_url="",
+            human_message="",
+            python_code=(
+                "response = [${model}, ${model_provider}, ${api_key}, "
+                "${base_url}, ${human_message}]"
+            ),
         ),
     )
-    empty_code = client.put(
-        f"/api/tools/{agent['id']}", json=_agent_body(python_code="")
-    )
-    empty_system_prompt = client.put(
-        f"/api/tools/{agent['id']}", json=_agent_body(system_prompt="")
+    empty_code = client.post(
+        f"/api/tools/{agent['id']}/test", json=_agent_body(python_code="")
     )
 
     assert missing.status_code == 400
     for field in ("model", "model_provider", "api_key", "base_url", "human_message"):
         assert field in missing.json()["detail"]
     assert empty_code.status_code == 400
-    assert empty_system_prompt.status_code == 200
+    assert empty_code.json()["detail"] == "Python 代码不能为空"
+
+
+def test_agent_update_allows_empty_unused_parameters(tmp_path, monkeypatch):
+    _patch_tools_storage(tmp_path, monkeypatch)
+    client = TestClient(app)
+    agent = client.post(
+        "/api/tools", json={"type": "agent", "name": "General Python", "description": ""}
+    ).json()["tool"]
+
+    response = client.put(
+        f"/api/tools/{agent['id']}",
+        json=_agent_body(
+            model="",
+            model_provider="",
+            api_key="",
+            base_url="",
+            human_message="",
+            python_code="import statistics\nprint(statistics.mean([2, 4, 6]))",
+        ),
+    )
+
+    assert response.status_code == 200
 
 
 def test_metadata_patch_preserves_agent_configuration(tmp_path, monkeypatch):
@@ -172,18 +261,24 @@ def test_agent_test_delegates_only_to_python_runtime(tmp_path, monkeypatch):
     ).json()["tool"]
     calls = {}
 
-    def fake_run(code, parameters):
+    def fake_run(code, parameters, run_id=None):
         calls["code"] = code
         calls["parameters"] = parameters
-        return {"ok": True, "logs": "runtime-output"}
+        calls["run_id"] = run_id
+        return {
+            "ok": True,
+            "logs": "runtime-output",
+            "response": {"answer": 42},
+        }
 
     monkeypatch.setattr(routes_tools, "run_agent_python", fake_run)
-    body = _agent_body()
+    body = _agent_body(run_id="agent-api-run")
     response = client.post(f"/api/tools/{agent['id']}/test", json=body)
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["logs"] == "runtime-output"
+    assert response.json()["response"] == {"answer": 42}
     assert response.json()["latency_ms"] >= 0
     assert calls["code"] == body["python_code"]
     assert calls["parameters"] == {
@@ -194,6 +289,7 @@ def test_agent_test_delegates_only_to_python_runtime(tmp_path, monkeypatch):
         "system_prompt": "system",
         "human_message": "human",
     }
+    assert calls["run_id"] == "agent-api-run"
 
 
 def test_agent_test_returns_template_error_and_old_llm_route_is_removed(tmp_path, monkeypatch):
@@ -234,79 +330,66 @@ def test_agent_api_preserves_emoji_in_worker_logs(tmp_path, monkeypatch):
     assert "执行成功 🍖" in response.json()["logs"]
 
 
-def test_script_runtime_remains_restricted(tmp_path, monkeypatch):
+def test_script_run_delegates_to_unrestricted_python_worker(tmp_path, monkeypatch):
     _patch_tools_storage(tmp_path, monkeypatch)
     client = TestClient(app)
     script = client.post(
-        "/api/tools", json={"type": "script", "name": "Restricted", "description": ""}
+        "/api/tools", json={"type": "script", "name": "Runtime", "description": ""}
     ).json()["tool"]
+    calls = {}
 
-    ok = client.post(f"/api/tools/{script['id']}/run", json={"script_code": "print('ok')"})
-    blocked = client.post(
-        f"/api/tools/{script['id']}/run", json={"script_code": "import os"}
+    def fake_run(code, run_id=None):
+        calls["code"] = code
+        calls["run_id"] = run_id
+        return {
+            "ok": True,
+            "logs": "script-output",
+            "response": {"answer": 42},
+        }
+
+    monkeypatch.setattr(routes_tools, "run_script_python", fake_run)
+    code = "import langchain\nresponse = {'answer': 42}"
+    response = client.post(
+        f"/api/tools/{script['id']}/run",
+        json={"script_code": code, "run_id": "script-api-run"},
     )
 
-    assert ok.json() == {"ok": True, "logs": "ok\n"}
-    assert blocked.json()["ok"] is False
-    assert "__import__" in blocked.json()["logs"]
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["logs"] == "script-output"
+    assert response.json()["response"] == {"answer": 42}
+    assert response.json()["latency_ms"] >= 0
+    assert calls["code"] == code
+    assert calls["run_id"] == "script-api-run"
 
 
-def test_rejects_unknown_type_and_migrates_legacy_script(tmp_path, monkeypatch):
-    tools_file = _patch_tools_storage(tmp_path, monkeypatch)
+def test_interrupt_run_delegates_idempotently(monkeypatch):
+    client = TestClient(app)
+    calls = []
+
+    def fake_interrupt(run_id):
+        calls.append(run_id)
+        return len(calls) == 1
+
+    monkeypatch.setattr(routes_tools, "interrupt_python_run", fake_interrupt)
+
+    first = client.post("/api/tools/runs/current-run/interrupt")
+    repeated = client.post("/api/tools/runs/current-run/interrupt")
+
+    assert first.status_code == 200
+    assert first.json() == {
+        "ok": True,
+        "run_id": "current-run",
+        "process_terminated": True,
+    }
+    assert repeated.status_code == 200
+    assert repeated.json()["process_terminated"] is False
+    assert calls == ["current-run", "current-run"]
+
+
+def test_rejects_unknown_type(tmp_path, monkeypatch):
+    _patch_tools_storage(tmp_path, monkeypatch)
     client = TestClient(app)
     assert client.post(
         "/api/tools", json={"type": "shell", "name": "bad", "description": ""}
     ).status_code == 400
-    tools_file.write_text(
-        json.dumps(
-            {
-                "tools": [
-                    {
-                        "id": "legacy-script",
-                        "type": "python_script",
-                        "name": "Legacy Script",
-                        "content": "print('legacy')",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    tool = client.get("/api/tools/legacy-script").json()["tool"]
-    assert tool["type"] == "script"
-    assert tool["script_code"] == "print('legacy')"
-
-
-def test_load_migrates_and_persists_legacy_agent_placeholders(tmp_path, monkeypatch):
-    tools_file = _patch_tools_storage(tmp_path, monkeypatch)
-    legacy_code = (
-        'response = {"model": {{model}}, '
-        '"extra_body": {"thinking": {"type": "disabled"}}}'
-    )
-    tools_file.write_text(
-        json.dumps(
-            {
-                "tools": [
-                    {
-                        "id": "legacy-agent",
-                        "type": "agent",
-                        "name": "Legacy Agent",
-                        "python_code": legacy_code,
-                        "agent_template_version": 2,
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    tool = TestClient(app).get("/api/tools/legacy-agent").json()["tool"]
-    persisted = json.loads(tools_file.read_text(encoding="utf-8"))["tools"][0]
-
-    assert tool["python_code"] == (
-        'response = {"model": ${model}, '
-        '"extra_body": {"thinking": {"type": "disabled"}}}'
-    )
-    assert tool["agent_template_version"] == routes_tools.AGENT_TEMPLATE_VERSION
-    assert persisted["python_code"] == tool["python_code"]
-    assert persisted["agent_template_version"] == routes_tools.AGENT_TEMPLATE_VERSION

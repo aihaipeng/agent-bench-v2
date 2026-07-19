@@ -2,9 +2,10 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Bench</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/execution.css" />
 </head>
 <body>
     <div class="app-layout">
@@ -13,8 +14,18 @@
             <div class="sidebar-brand">Agent Bench</div>
             <ul class="sidebar-nav">
                 <li class="sidebar-item active" data-view="sets">📋 测试集管理</li>
+                <li class="sidebar-item" data-view="targets">◎ Target 管理</li>
                 <li class="sidebar-item" data-view="tools">🧰 工具管理</li>
+                <li class="sidebar-item" data-view="workflows">⌘ 工作流编排</li>
+                <li class="sidebar-item" data-view="runs">▷ 运行中心</li>
+                <li class="sidebar-item" data-view="faq">❓ FAQ</li>
             </ul>
+            <div class="sidebar-footer">
+                <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换到黑夜模式" aria-pressed="false" title="切换到黑夜模式">
+                    <span class="theme-toggle-icon" aria-hidden="true">☾</span>
+                    <span class="theme-toggle-label">黑夜模式</span>
+                </button>
+            </div>
         </nav>
 
         <!-- 右侧主内容区 -->
@@ -96,10 +107,25 @@
         </div>
     </div>
 
+    <!-- 导出全部工具确认弹窗 -->
+    <div id="tool-export-overlay" class="overlay hidden">
+        <div class="modal modal-sm">
+            <div class="modal-header">确认导出</div>
+            <div class="modal-body">
+                <p>当前未勾选工具，将导出全部工具。</p>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-tool-export-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-tool-export-confirm" class="btn btn-primary">确认导出</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div id="toast" class="toast hidden"></div>
 
     <script src="/assets/codemirror-python.js?v=1"></script>
     <script src="/app.js"></script>
+    <script src="/execution.js"></script>
 </body>
 </html>

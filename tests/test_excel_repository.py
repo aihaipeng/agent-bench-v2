@@ -30,6 +30,7 @@ def test_read_cases_uses_only_case_id_and_question_columns(tmp_path):
         ("case_001", "第一个问题"),
         ("case_002", "第二个问题"),
     ]
+    assert [case.row_number for case in cases] == [2, 3]
 
 
 def test_missing_sheet_raises_clear_error(tmp_path):

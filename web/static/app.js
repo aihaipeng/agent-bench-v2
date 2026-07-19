@@ -5,11 +5,12 @@ var API = {
         if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
         return res.json();
     },
-    post: async function (url, body) {
+    post: async function (url, body, options) {
         var res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
+            signal: options && options.signal,
         });
         if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
         return res.json();
@@ -76,10 +77,149 @@ var toolSortDir = 'desc';
 var toolCache = [];
 var selectedToolIds = {};
 var editingToolId = null;
+var toolRegistryErrors = [];
+var toolRegistryErrorTitle = '';
+var activeToolRun = null;
 var importFiles = [];
 var nameClickTimer = null;
 var toolNameClickTimer = null;
 var toolCodeEditor = null;
+
+var FAQ_ITEMS = [
+    {
+        category: '安装',
+        question: '代码出现 No module named ... 时应该怎么处理？',
+        keywords: 'ModuleNotFoundError 缺少模块 import 包名',
+        answer:
+            '<p>先从完整 Traceback 中确认缺少的 import 模块名。Script 和 Agent Worker 都不会自动安装依赖，也不要在编辑器代码中调用 pip 或 uv。</p>' +
+            '<ol>' +
+                '<li>确认该模块对应的 PyPI 发行包名称。</li>' +
+                '<li>将发行包和版本范围加入 <code>pyproject.toml</code>。</li>' +
+                '<li>在项目根目录执行 <code>uv sync</code>。</li>' +
+                '<li>同步成功后重新运行原代码。</li>' +
+            '</ol>'
+    },
+    {
+        category: '安装',
+        question: '如何确认 import 名称对应哪个发行包？',
+        keywords: 'Pillow PIL sklearn scikit-learn yaml PyYAML distribution',
+        answer:
+            '<p>import 名称与发行包名称不一定相同，应以包的官方文档或 PyPI 项目页为准。</p>' +
+            '<div class="faq-table-wrap"><table class="faq-table"><thead><tr><th>代码中的 import</th><th>pyproject.toml 中的发行包</th></tr></thead>' +
+            '<tbody><tr><td><code>from PIL import Image</code></td><td><code>Pillow</code></td></tr>' +
+            '<tr><td><code>import sklearn</code></td><td><code>scikit-learn</code></td></tr>' +
+            '<tr><td><code>import yaml</code></td><td><code>PyYAML</code></td></tr></tbody></table></div>' +
+            '<p>不要仅根据 import 名称猜测发行包，避免安装同名恶意包。</p>'
+    },
+    {
+        category: '安装',
+        question: '如何手工编辑 pyproject.toml 添加依赖？',
+        keywords: 'dependencies pendulum TOML 手工添加 版本范围',
+        answer:
+            '<p>打开项目根目录的 <code>pyproject.toml</code>，在 <code>[project]</code> 下的 <code>dependencies</code> 数组中增加一行。保留逗号并使用合理的版本范围。</p>' +
+            '<pre><code>[project]\ndependencies = [\n    # 已有依赖...\n    "pendulum&gt;=3,&lt;4",\n]</code></pre>' +
+            '<p>保存后在项目根目录运行：</p>' +
+            '<pre><code>uv sync</code></pre>' +
+            '<p><code>uv sync</code> 会更新 <code>uv.lock</code> 并让当前虚拟环境与声明的依赖保持一致。</p>'
+    },
+    {
+        category: '安装',
+        question: '可以用 uv add 代替手工编辑文件吗？',
+        keywords: 'uv add 命令 自动更新 lock',
+        answer:
+            '<p>可以。该命令仍属于人工依赖管理，只是由 uv 负责修改 <code>pyproject.toml</code>、更新锁文件并同步环境。</p>' +
+            '<pre><code>uv add "pendulum&gt;=3,&lt;4"</code></pre>' +
+            '<p>执行后应检查 <code>pyproject.toml</code> 和 <code>uv.lock</code> 的变更，确认没有意外升级其他核心依赖。</p>'
+    },
+    {
+        category: '验证',
+        question: '依赖安装完成后如何验证？',
+        keywords: '验证 import version sys executable 编辑器 response',
+        answer:
+            '<p>先在项目根目录验证命令行使用的是同一个环境：</p>' +
+            '<pre><code>uv run python -c "import pendulum; print(pendulum.__version__)"</code></pre>' +
+            '<p>命令成功后，再在对应的 Script 或 Agent Python 编辑器运行最小代码：</p>' +
+            '<pre><code>from pendulum import now\n\nresponse = {\n    "current_time": now("Asia/Shanghai").to_iso8601_string(),\n}\nprint(response)</code></pre>' +
+            '<p>运行日志应打印时间，结构化 response 中应包含 <code>current_time</code>。</p>'
+    },
+    {
+        category: '验证',
+        question: '安装依赖后需要关闭页面或重启服务吗？',
+        keywords: '刷新 页面 重启 服务 Worker 子进程 sys.executable',
+        answer:
+            '<p>通常不需要关闭页面。每次运行 Script 或 Agent 都会启动新的 Python Worker，<code>uv sync</code> 成功后下一次运行即可加载新包。</p>' +
+            '<p>出现以下情况时建议重启 Web 服务：升级了 FastAPI、Pydantic、LangChain 等服务自身正在使用的核心包；Windows 文件锁导致同步不完整；命令行验证成功但 Worker 仍报告旧版本。</p>'
+    },
+    {
+        category: '管理',
+        question: '如何升级或降级一个依赖？',
+        keywords: '升级 降级 pin version constraint uv tree lock',
+        answer:
+            '<p>修改 <code>pyproject.toml</code> 中该依赖的版本范围，然后重新同步。例如固定到兼容的 3.x 版本：</p>' +
+            '<pre><code>"pendulum&gt;=3.0.0,&lt;4",</code></pre>' +
+            '<p>也可以执行：</p>' +
+            '<pre><code>uv add "pendulum&gt;=3.0.0,&lt;4"\nuv sync\nuv tree</code></pre>' +
+            '<p>升级或降级后必须重新运行相关 Agent 用例和完整回归测试。</p>'
+    },
+    {
+        category: '管理',
+        question: '如何卸载不再需要的依赖？',
+        keywords: '卸载 删除 uv remove transitive dependency',
+        answer:
+            '<p>推荐使用 uv 删除依赖声明并同步环境：</p>' +
+            '<pre><code>uv remove pendulum</code></pre>' +
+            '<p>也可以手工删除 <code>pyproject.toml</code> 中对应行，再执行 <code>uv sync</code>。不要直接删除虚拟环境中的包文件；uv 会根据锁文件处理不再需要的传递依赖。</p>'
+    },
+    {
+        category: '故障',
+        question: 'uv sync 失败时应该检查什么？',
+        keywords: '网络 代理 冲突 wheel Python 3.14 build failed sync error',
+        answer:
+            '<ol>' +
+                '<li>检查错误中是网络、版本冲突、Python 版本还是本地编译失败。</li>' +
+                '<li>确认包支持当前 Python 版本；本项目当前运行 Python 3.14。</li>' +
+                '<li>检查版本范围是否与现有 LangChain、Pydantic 等依赖冲突。</li>' +
+                '<li>需要代理时先在终端正确配置网络环境，再重试 <code>uv sync</code>。</li>' +
+                '<li>检查 <code>git diff -- pyproject.toml uv.lock</code>，确认修改范围。</li>' +
+            '</ol>' +
+            '<p>不要为了绕过错误直接删除 <code>.venv</code> 或锁文件；先保留完整日志并定位根因。</p>'
+    },
+    {
+        category: '故障',
+        question: '包已经安装，为什么 Script 或 Agent 仍然无法 import？',
+        keywords: '错误环境 interpreter path uv pip show import cache',
+        answer:
+            '<p>最常见原因是包装在另一个 Python 环境、发行包名与 import 名不一致，或同步后仍在运行旧的服务进程。</p>' +
+            '<pre><code>uv run python -c "import sys; print(sys.executable)"\nuv pip show pendulum\nuv run python -c "import pendulum; print(pendulum.__file__)"</code></pre>' +
+            '<p>以上命令都成功但页面仍失败时，停止 Web 服务并重新执行 <code>uv run python run.py</code>。</p>'
+    },
+    {
+        category: '故障',
+        question: '依赖变更导致项目异常时如何回滚？',
+        keywords: '回滚 restore pyproject uv.lock git diff regression',
+        answer:
+            '<ol>' +
+                '<li>停止新的 Script 和 Agent 运行，保留失败日志。</li>' +
+                '<li>使用 <code>git diff -- pyproject.toml uv.lock</code> 确认本次依赖变更。</li>' +
+                '<li>手工恢复本次修改前的依赖声明和锁文件内容，不要覆盖其他人的改动。</li>' +
+                '<li>重新执行 <code>uv sync</code>。</li>' +
+                '<li>运行 <code>uv run pytest</code> 并验证关键 Agent。</li>' +
+            '</ol>'
+    },
+    {
+        category: '安全',
+        question: '人工安装第三方包有哪些安全要求？',
+        keywords: '安全 supply chain malicious package secret API key review',
+        answer:
+            '<ul>' +
+                '<li>只使用官方文档确认的发行包名称和可信来源。</li>' +
+                '<li>设置合理版本范围并检查锁文件，避免无意升级整个依赖树。</li>' +
+                '<li>安装前检查包的维护状态、许可证和 Python 版本支持。</li>' +
+                '<li>不要把 API Key、令牌或私有源密码写入 <code>pyproject.toml</code>。</li>' +
+                '<li>第三方包的构建和安装过程可能执行代码，只安装业务确实需要的依赖。</li>' +
+            '</ul>'
+    }
+];
 
 function destroyToolCodeEditor() {
     if (toolCodeEditor) {
@@ -115,13 +255,72 @@ var ICON_DATA = {
     trash: "data:image/png;base64,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",
 };
 
+var ICON_PATHS = {
+    export: '/assets/icons/export.png',
+};
+
 function icon(name) {
-    var data = ICON_DATA[name];
+    var data = ICON_PATHS[name] || ICON_DATA[name];
     return data ? '<img class="icon-img" src="' + data + '" alt="" aria-hidden="true" />' : "";
 }
 
 /* ===== Initialize ===== */
+var THEME_STORAGE_KEY = 'agent-bench-theme';
+
+function storedTheme() {
+    try {
+        var value = window.localStorage.getItem(THEME_STORAGE_KEY);
+        return value === 'light' || value === 'dark' ? value : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function preferredTheme() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light';
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    var button = document.getElementById('theme-toggle');
+    if (!button) return;
+
+    var dark = theme === 'dark';
+    var nextLabel = dark ? '白天模式' : '黑夜模式';
+    button.setAttribute('aria-label', '切换到' + nextLabel);
+    button.setAttribute('aria-pressed', String(dark));
+    button.setAttribute('title', '切换到' + nextLabel);
+    button.querySelector('.theme-toggle-icon').textContent = dark ? '☀' : '☾';
+    button.querySelector('.theme-toggle-label').textContent = nextLabel;
+}
+
+function initTheme() {
+    applyTheme(storedTheme() || preferredTheme());
+
+    document.getElementById('theme-toggle').addEventListener('click', function () {
+        var current = document.documentElement.getAttribute('data-theme');
+        var next = current === 'dark' ? 'light' : 'dark';
+        try {
+            window.localStorage.setItem(THEME_STORAGE_KEY, next);
+        } catch (error) {
+            // Theme switching still works when browser storage is unavailable.
+        }
+        applyTheme(next);
+    });
+
+    if (!window.matchMedia) return;
+    var media = window.matchMedia('(prefers-color-scheme: dark)');
+    var syncSystemTheme = function (event) {
+        if (!storedTheme()) applyTheme(event.matches ? 'dark' : 'light');
+    };
+    if (media.addEventListener) media.addEventListener('change', syncSystemTheme);
+    else if (media.addListener) media.addListener(syncSystemTheme);
+}
+
 function init() {
+    initTheme();
     viewSets();
 }
 init();
@@ -133,13 +332,92 @@ document.querySelector('.sidebar-nav').addEventListener('click', function (e) {
     document.querySelectorAll('.sidebar-item').forEach(function (el) { el.classList.remove('active'); });
     item.classList.add('active');
     var view = item.getAttribute('data-view');
+    if (view !== 'runs' && typeof disconnectRunEvents === 'function') disconnectRunEvents();
     if (view === 'sets') {
         setsPage = 1;
         viewSets();
+    } else if (view === 'targets') {
+        viewTargets();
     } else if (view === 'tools') {
         viewTools();
+    } else if (view === 'workflows') {
+        viewWorkflows();
+    } else if (view === 'runs') {
+        viewRuns();
+    } else if (view === 'faq') {
+        viewFaq();
     }
 });
+
+/* ========================================================================
+   View: FAQ
+   ======================================================================== */
+function viewFaq() {
+    destroyToolCodeEditor();
+    currentView = 'faq';
+
+    contentArea.innerHTML =
+        '<section class="faq-page" aria-labelledby="faq-title">' +
+            '<header class="faq-header">' +
+                '<div>' +
+                    '<h1 class="faq-title" id="faq-title">Python 第三方依赖 FAQ</h1>' +
+                    '<p class="faq-subtitle">Script / Agent 人工安装与环境维护</p>' +
+                '</div>' +
+                '<span class="faq-result-count" id="faq-result-count"></span>' +
+            '</header>' +
+            '<div class="faq-toolbar">' +
+                '<input type="search" class="input" id="faq-search" aria-label="搜索 FAQ" placeholder="搜索问题、包名或错误..." />' +
+                '<select class="input" id="faq-category" aria-label="筛选 FAQ 类别">' +
+                    '<option value="">全部类别</option>' +
+                    '<option value="安装">安装</option>' +
+                    '<option value="验证">验证</option>' +
+                    '<option value="管理">管理</option>' +
+                    '<option value="故障">故障</option>' +
+                    '<option value="安全">安全</option>' +
+                '</select>' +
+            '</div>' +
+            '<div class="faq-list" id="faq-list"></div>' +
+        '</section>';
+
+    document.getElementById('faq-search').addEventListener('input', renderFaqItems);
+    document.getElementById('faq-category').addEventListener('change', renderFaqItems);
+    renderFaqItems();
+}
+
+function faqSearchText(item) {
+    var answer = document.createElement('div');
+    answer.innerHTML = item.answer;
+    return (item.question + ' ' + item.category + ' ' + item.keywords + ' ' + answer.textContent).toLowerCase();
+}
+
+function renderFaqItems() {
+    var searchInput = document.getElementById('faq-search');
+    var categoryInput = document.getElementById('faq-category');
+    var list = document.getElementById('faq-list');
+    if (!searchInput || !categoryInput || !list) return;
+
+    var query = searchInput.value.trim().toLowerCase();
+    var category = categoryInput.value;
+    var filtered = FAQ_ITEMS.filter(function (item) {
+        return (!category || item.category === category) && (!query || faqSearchText(item).includes(query));
+    });
+
+    document.getElementById('faq-result-count').textContent = filtered.length + ' 个问题';
+    if (filtered.length === 0) {
+        list.innerHTML = '<div class="faq-empty">没有匹配的问题</div>';
+        return;
+    }
+
+    list.innerHTML = filtered.map(function (item) {
+        return '<details class="faq-item">' +
+            '<summary>' +
+                '<span class="faq-question">' + esc(item.question) + '</span>' +
+                '<span class="faq-category">' + esc(item.category) + '</span>' +
+            '</summary>' +
+            '<div class="faq-answer">' + item.answer + '</div>' +
+        '</details>';
+    }).join('');
+}
 
 /* ========================================================================
    View: Test Set List
@@ -156,7 +434,9 @@ async function viewSets() {
             '<button class="btn btn-sm" id="btn-refresh">' + icon('refresh') + '刷新</button>' +
             '<input type="search" class="input toolbar-search" id="set-name-search" placeholder="按名称搜索..." value="' + escAttr(setsNameQuery) + '" />' +
             '<span class="toolbar-sep"></span>' +
-            '<button class="btn btn-sm btn-danger" id="btn-delete-batch">' + icon('trash') + '删除</button>' +
+            '<div class="toolbar-batch-actions">' +
+                '<button class="btn btn-sm btn-danger" id="btn-delete-batch">' + icon('trash') + '删除</button>' +
+            '</div>' +
         '</div>' +
         '<div class="table-wrap" id="sets-table-wrap">' +
             '<table class="table" id="sets-table">' +
@@ -164,6 +444,7 @@ async function viewSets() {
                     '<th class="col-check" data-col="check"><input type="checkbox" id="check-all" title="全选" /></th>' +
                     '<th class="col-name" data-col="name">名称</th>' +
                     '<th class="col-desc" data-col="description">说明</th>' +
+                    '<th class="col-address" data-col="address">地址</th>' +
                     '<th class="col-updated" data-col="updated">' +
                         '<button class="th-sort" data-set-sort="updated_at" type="button">更新时间 ' + setSortMark('updated_at') + '</button>' +
                     '</th>' +
@@ -192,6 +473,7 @@ function bindSetsEvents() {
             c.checked = state;
             updateRowSelected(c);
         });
+        updateSetBatchDeleteState();
     });
 
     document.getElementById('btn-import-inline').addEventListener('click', function () {
@@ -247,6 +529,20 @@ function updateRowSelected(cb) {
     }
 }
 
+function updateSetBatchDeleteState() {
+    var checked = getCheckedFilenames();
+    var all = getAllFilenamesOnPage();
+    var deleteBtn = document.getElementById('btn-delete-batch');
+    if (deleteBtn) {
+        deleteBtn.innerHTML = icon('trash') + (checked.length > 0 ? '删除 ' + checked.length : '删除');
+    }
+    var checkAll = document.getElementById('check-all');
+    if (checkAll) {
+        checkAll.checked = all.length > 0 && checked.length === all.length;
+        checkAll.indeterminate = checked.length > 0 && checked.length < all.length;
+    }
+}
+
 async function loadSets() {
     try {
         var data = await API.get(
@@ -269,29 +565,27 @@ async function loadSets() {
 function renderSets(files) {
     var tbody = document.getElementById('sets-tbody');
     if (!files || files.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-hint">暂无测试集，请先导入</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-hint">暂无测试集，请先导入</td></tr>';
+        updateSetBatchDeleteState();
         return;
     }
     tbody.innerHTML = files.map(function (f) {
         var displayName = f.name || fileStem(f.filename);
-        var metaText = f.filename + ' · ' + formatSize(f.size);
         var updatedText = formatDateTime(f.updated_at);
         return '<tr>' +
             '<td class="col-check"><input type="checkbox" class="row-check" data-filename="' + escAttr(f.filename) + '" /></td>' +
-            '<td class="col-name-cell" data-filename="' + escAttr(f.filename) + '" data-name="' + escAttr(displayName) + '" data-size-label="' + escAttr(formatSize(f.size)) + '" title="' + escAttr(displayName + '\\n' + metaText) + '">' +
-                '<div class="file-title-row">' +
-                    '<span class="file-name file-link" data-filename="' + escAttr(f.filename) + '" title="' + escAttr(displayName) + '">' + esc(displayName) + '</span>' +
-                '</div>' +
-                '<div class="file-meta" title="' + escAttr(metaText) + '">' + esc(metaText) + '</div>' +
+            '<td class="col-name-cell" data-filename="' + escAttr(f.filename) + '" data-name="' + escAttr(displayName) + '" data-size-label="' + escAttr(formatSize(f.size)) + '" title="' + escAttr(displayName + '\\n' + f.filename) + '">' +
+                '<span class="file-name file-link" data-filename="' + escAttr(f.filename) + '" title="' + escAttr(displayName) + '">' + esc(displayName) + '</span>' +
             '</td>' +
             '<td class="col-desc" data-filename="' + escAttr(f.filename) + '" data-description="' + escAttr(f.description || '') + '" title="' + escAttr(f.description || '未填写') + '">' +
                 (f.description ? '<span class="set-description">' + esc(f.description) + '</span>' : '<span class="desc-empty">未填写</span>') +
             '</td>' +
+            '<td class="col-address" title="' + escAttr(f.filename) + '">' +
+                '<button class="list-meta-link set-file-link" type="button" data-filename="' + escAttr(f.filename) + '" title="打开原始文件所在目录">' + esc(f.filename) + '</button>' +
+            '</td>' +
             '<td class="col-updated" title="' + escAttr(updatedText) + '">' + updatedText + '</td>' +
             '<td class="col-actions">' +
-                '<div class="action-buttons">' +
-                    '<button class="btn-icon" data-action="edit" data-filename="' + escAttr(f.filename) + '" title="编辑测试集" aria-label="编辑测试集">' + icon('edit') + '</button>' +
-                    '<button class="btn-icon" data-action="open-dir" data-filename="' + escAttr(f.filename) + '" title="打开目录" aria-label="打开目录">' + icon('folder') + '</button>' +
+                '<div class="action-buttons action-buttons-single">' +
                     '<button class="btn-icon" data-action="delete" data-filename="' + escAttr(f.filename) + '" title="删除测试集" aria-label="删除测试集">' + icon('trash') + '</button>' +
                 '</div>' +
             '</td>' +
@@ -308,6 +602,7 @@ function renderSets(files) {
             }, 220);
         });
     });
+    tbody.querySelectorAll('.set-file-link').forEach(bindSetFilenameLink);
 
     tbody.querySelectorAll('.col-name-cell').forEach(function (cell) {
         cell.addEventListener('dblclick', function (e) {
@@ -330,35 +625,44 @@ function renderSets(files) {
     tbody.querySelectorAll('.btn-icon').forEach(function (btn) {
         btn.addEventListener('click', function (e) {
             e.stopPropagation();
-            var action = btn.getAttribute('data-action');
             var fname = btn.getAttribute('data-filename');
-            if (action === 'edit') viewBrowse(fname);
-            else if (action === 'open-dir') openDir(fname);
-            else if (action === 'delete') {
-                if (confirm('确定删除测试集 "' + fname + '"？此操作不可恢复。')) {
-                    deleteSingleSet(fname);
-                }
+            if (confirm('确定删除测试集 "' + fname + '"？此操作不可恢复。')) {
+                deleteSingleSet(fname);
             }
         });
     });
 
     // Checkbox
     tbody.querySelectorAll('.row-check').forEach(function (cb) {
-        cb.addEventListener('change', function () { updateRowSelected(cb); });
+        cb.addEventListener('change', function () {
+            updateRowSelected(cb);
+            updateSetBatchDeleteState();
+        });
+    });
+    updateSetBatchDeleteState();
+}
+
+function bindSetFilenameLink(link) {
+    if (!link) return;
+    link.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearTimeout(nameClickTimer);
+        var filename = link.getAttribute('data-filename');
+        if (filename) openDir(filename);
+    });
+    link.addEventListener('dblclick', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
     });
 }
 
 function renderNameCell(cell, name) {
     var filename = cell.getAttribute('data-filename') || '';
     var displayName = name || fileStem(filename);
-    var metaText = filename + ' · ' + cell.getAttribute('data-size-label');
     cell.setAttribute('data-name', displayName);
-    cell.setAttribute('title', displayName + '\n' + metaText);
-    cell.innerHTML =
-        '<div class="file-title-row">' +
-            '<span class="file-name file-link" data-filename="' + escAttr(filename) + '" title="' + escAttr(displayName) + '">' + esc(displayName) + '</span>' +
-        '</div>' +
-        '<div class="file-meta" title="' + escAttr(metaText) + '">' + esc(metaText) + '</div>';
+    cell.setAttribute('title', displayName + '\n' + filename);
+    cell.innerHTML = '<span class="file-name file-link" data-filename="' + escAttr(filename) + '" title="' + escAttr(displayName) + '">' + esc(displayName) + '</span>';
     var link = cell.querySelector('.file-link');
     link.addEventListener('click', function () {
         clearTimeout(nameClickTimer);
@@ -373,13 +677,10 @@ function startInlineNameEdit(cell) {
 
     var filename = cell.getAttribute('data-filename');
     var original = cell.getAttribute('data-name') || fileStem(filename);
-    var sizeText = (cell.querySelector('.file-meta') || {}).textContent || '';
-    var sizeLabel = sizeText.indexOf(' · ') >= 0 ? sizeText.split(' · ').slice(1).join(' · ') : '';
-    cell.setAttribute('data-size-label', sizeLabel);
     cell.classList.add('editing-name');
     cell.innerHTML =
         '<input type="text" class="input inline-name-input" value="' + escAttr(original) + '" />' +
-        '<div class="file-meta">' + esc(filename) + ' · ' + esc(sizeLabel) + '</div>' +
+        '<div class="file-meta">' + esc(filename) + '</div>' +
         '<div class="inline-desc-hint">Enter 保存，Esc 取消</div>';
 
     var input = cell.querySelector('.inline-name-input');
@@ -510,24 +811,22 @@ async function viewBrowse(filename) {
     casesPage = 1;
 
     contentArea.innerHTML =
-        '<div class="breadcrumb">' +
+        '<div class="breadcrumb set-edit-header">' +
             '<button class="btn btn-sm" id="btn-back">' + icon('back') + '返回</button>' +
             '<button class="btn btn-sm btn-primary" id="btn-save-set-meta">' + icon('edit') + '保存</button>' +
-            '<span class="breadcrumb-title" id="browse-set-title">' + esc(fileStem(filename)) + '</span>' +
-            '<span class="breadcrumb-meta" id="browse-file-meta"></span>' +
+            '<span class="breadcrumb-title set-edit-header-title" id="browse-set-title">' + esc(fileStem(filename)) + '</span>' +
+            '<span class="breadcrumb-meta set-edit-file-meta" id="browse-file-meta"></span>' +
         '</div>' +
         '<div class="edit-section set-edit-summary">' +
             '<div class="edit-section-title">测试集信息</div>' +
             '<div class="set-edit-grid">' +
-                '<div class="set-edit-left">' +
-                    '<div class="form-row">' +
-                        '<label class="form-label" for="set-name-input">名称</label>' +
-                        '<input type="text" class="input" id="set-name-input" placeholder="输入测试集名称..." />' +
-                    '</div>' +
+                '<div class="form-row-horizontal set-edit-field">' +
+                    '<label class="form-label-h" for="set-name-input">名称</label>' +
+                    '<input type="text" class="input" id="set-name-input" placeholder="输入测试集名称..." />' +
                 '</div>' +
-                '<div class="form-row set-edit-right">' +
-                    '<label class="form-label" for="set-description-input">说明</label>' +
-                    '<textarea class="input set-description-input" id="set-description-input" placeholder="填写这个测试集的用途、覆盖范围或注意事项..."></textarea>' +
+                '<div class="form-row-horizontal set-edit-field">' +
+                    '<label class="form-label-h" for="set-description-input">说明</label>' +
+                    '<input type="text" class="input set-description-input" id="set-description-input" placeholder="填写用途、覆盖范围或注意事项..." />' +
                 '</div>' +
             '</div>' +
         '</div>' +
@@ -572,7 +871,7 @@ async function viewBrowse(filename) {
             if (found.length > 0) {
                 browseFileMeta = { size: found[0].size, updated_at: found[0].updated_at, description: found[0].description || '', name: found[0].name || fileStem(filename) };
                 document.getElementById('browse-file-meta').textContent =
-                    found[0].filename + ' · ' + formatSize(found[0].size) + ' · ' + (found[0].updated_at || '').replace('T', ' ');
+                    found[0].filename + ' · ' + formatSize(found[0].size);
             }
         } catch (e) { /* ignore */ }
 
@@ -680,8 +979,14 @@ async function viewTools() {
                 '<option value="agent"' + (toolTypeFilter === 'agent' ? ' selected' : '') + '>Agent</option>' +
             '</select>' +
             '<span class="toolbar-sep"></span>' +
-            '<button class="btn btn-sm btn-danger" id="btn-tool-delete-batch" disabled>' + icon('trash') + '删除</button>' +
+            '<div class="toolbar-batch-actions">' +
+                '<button class="btn btn-sm" id="btn-tool-import">' + icon('import') + '导入</button>' +
+                '<input type="file" id="tool-import-file" accept=".zip,application/zip" multiple hidden />' +
+                '<button class="btn btn-sm" id="btn-tool-export-batch">' + icon('export') + '导出</button>' +
+                '<button class="btn btn-sm btn-danger" id="btn-tool-delete-batch" disabled>' + icon('trash') + '删除</button>' +
+            '</div>' +
         '</div>' +
+        '<div class="tool-registry-errors hidden" id="tool-registry-errors" role="status"></div>' +
         '<div class="table-wrap" id="tools-table-wrap">' +
             '<table class="table" id="tools-table">' +
                 '<thead><tr>' +
@@ -691,6 +996,7 @@ async function viewTools() {
                     '</th>' +
                     '<th class="tool-equal-col" data-col="type">类型</th>' +
                     '<th class="tool-equal-col" data-col="desc">说明</th>' +
+                    '<th class="tool-equal-col" data-col="address">地址</th>' +
                     '<th class="tool-equal-col" data-col="updated">' +
                         '<button class="th-sort" data-sort="updated_at" type="button">更新时间 ' + sortMark('updated_at') + '</button>' +
                     '</th>' +
@@ -701,6 +1007,7 @@ async function viewTools() {
         '</div>';
 
     bindToolsEvents();
+    renderToolRegistryErrors(toolRegistryErrorTitle, toolRegistryErrors);
     await loadTools();
     initTableResize('tools-table', 'tools-table-wrap');
 }
@@ -710,13 +1017,23 @@ function bindToolsEvents() {
         openToolCreateModal();
     });
 
+    document.getElementById('btn-tool-import').addEventListener('click', function () {
+        document.getElementById('tool-import-file').click();
+    });
+
+    document.getElementById('tool-import-file').addEventListener('change', async function () {
+        var files = Array.from(this.files || []);
+        this.value = '';
+        if (files.length > 0) await importToolFiles(files);
+    });
+
     document.getElementById('btn-tool-refresh').addEventListener('click', async function () {
         selectedToolIds = {};
-        await loadTools();
-        showToast('工具已刷新', 'success');
+        await refreshToolRegistry();
     });
 
     document.getElementById('btn-tool-delete-batch').addEventListener('click', deleteCheckedTools);
+    document.getElementById('btn-tool-export-batch').addEventListener('click', exportCheckedTools);
 
     document.getElementById('tool-check-all').addEventListener('change', function () {
         var checked = this.checked;
@@ -765,10 +1082,113 @@ async function loadTools() {
     }
 }
 
+function renderToolRegistryErrors(title, errors) {
+    var container = document.getElementById('tool-registry-errors');
+    if (!container) return;
+    if (!errors || errors.length === 0) {
+        container.classList.add('hidden');
+        container.innerHTML = '';
+        return;
+    }
+    container.classList.remove('hidden');
+    container.innerHTML =
+        '<div class="tool-registry-errors-title">' + esc(title || '部分工具文件未加载') + '</div>' +
+        '<ul>' + errors.map(function (item) {
+            return '<li><strong>' + esc(item.file || '未命名文件') + '</strong><span>' + esc(item.error || '未知错误') + '</span></li>';
+        }).join('') + '</ul>';
+}
+
+async function refreshToolRegistry() {
+    var button = document.getElementById('btn-tool-refresh');
+    if (button) button.disabled = true;
+    try {
+        var result = await API.post('/api/tools/refresh', {});
+        toolRegistryErrors = result.errors || [];
+        toolRegistryErrorTitle = '以下文件未能加载';
+        renderToolRegistryErrors(toolRegistryErrorTitle, toolRegistryErrors);
+        await loadTools();
+        showToast(
+            '已加载 ' + (result.loaded || 0) + ' 个工具' + (toolRegistryErrors.length ? '，跳过 ' + toolRegistryErrors.length + ' 个文件' : ''),
+            toolRegistryErrors.length ? 'error' : 'success'
+        );
+    } catch (e) {
+        showToast('刷新工具失败: ' + e.message, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function importToolFiles(files) {
+    var button = document.getElementById('btn-tool-import');
+    if (button) button.disabled = true;
+    var formData = new FormData();
+    files.forEach(function (file) { formData.append('files', file); });
+    try {
+        var result = await API.upload('/api/tools/import', formData);
+        var imported = result.imported || [];
+        toolRegistryErrors = result.errors || [];
+        toolRegistryErrorTitle = '以下文件未能导入';
+        renderToolRegistryErrors(toolRegistryErrorTitle, toolRegistryErrors);
+        await loadTools();
+        showToast(
+            '已导入 ' + imported.length + ' 个工具' + (toolRegistryErrors.length ? '，失败 ' + toolRegistryErrors.length + ' 个' : ''),
+            toolRegistryErrors.length ? 'error' : 'success'
+        );
+    } catch (e) {
+        showToast('导入工具失败: ' + e.message, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function downloadToolArchive(toolIds) {
+    var url = '/api/tools/export';
+    if (toolIds.length > 0) {
+        url += '?' + toolIds.map(function (toolId) {
+            return 'ids=' + encodeURIComponent(toolId);
+        }).join('&');
+    }
+    var button = document.getElementById('btn-tool-export-batch');
+    if (button) button.disabled = true;
+    try {
+        var response = await fetch(url);
+        if (!response.ok) {
+            var error = await response.json();
+            throw new Error(error.detail || response.statusText);
+        }
+        var blob = await response.blob();
+        var disposition = response.headers.get('Content-Disposition') || '';
+        var match = /filename="?([^";]+)"?/i.exec(disposition);
+        var filename = match ? match[1] : 'tools.zip';
+        var objectUrl = URL.createObjectURL(blob);
+        var anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+        showToast('工具导出成功', 'success');
+    } catch (e) {
+        showToast('导出工具失败: ' + e.message, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function openToolDir(toolId) {
+    try {
+        await API.post('/api/tools/' + encodeURIComponent(toolId) + '/open-dir', {});
+        showToast('已打开工具所在目录', 'success');
+    } catch (e) {
+        showToast('打开目录失败: ' + e.message, 'error');
+    }
+}
+
 function renderTools(tools) {
     var tbody = document.getElementById('tools-tbody');
     if (!tools || tools.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-hint">暂无工具，请先新增</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-hint">暂无工具，请先新增</td></tr>';
         updateToolBatchDeleteState();
         return;
     }
@@ -777,17 +1197,19 @@ function renderTools(tools) {
         var updatedText = (tool.updated_at || '').replace('T', ' ');
         return '<tr data-tool-id="' + escAttr(tool.id) + '">' +
             '<td class="col-check"><input type="checkbox" class="tool-row-check" data-tool-id="' + escAttr(tool.id) + '"' + (selectedToolIds[tool.id] ? ' checked' : '') + ' /></td>' +
-            '<td class="tool-name-cell tool-equal-col" data-tool-id="' + escAttr(tool.id) + '" data-name="' + escAttr(tool.name || '') + '" title="' + escAttr(tool.name || '') + '">' +
+            '<td class="tool-name-cell tool-equal-col" data-tool-id="' + escAttr(tool.id) + '" data-name="' + escAttr(tool.name || '') + '" title="' + escAttr((tool.name || '') + '\\n' + tool.id) + '">' +
                 '<span class="tool-name">' + esc(tool.name) + '</span>' +
             '</td>' +
-            '<td class="tool-equal-col" title="' + escAttr(typeText) + '"><span class="type-pill type-' + escAttr(tool.type) + '">' + typeText + '</span></td>' +
+            '<td class="tool-equal-col tool-type-cell" title="' + escAttr(typeText) + '"><span class="type-pill type-' + escAttr(tool.type) + '">' + typeText + '</span></td>' +
             '<td class="tool-equal-col tool-desc-cell" data-tool-id="' + escAttr(tool.id) + '" data-description="' + escAttr(tool.description || '') + '" title="' + escAttr(tool.description || '') + '">' +
                 (tool.description ? '<span class="set-description">' + esc(tool.description) + '</span>' : '<span class="desc-empty">未填写</span>') +
             '</td>' +
-            '<td class="tool-equal-col" title="' + escAttr(updatedText) + '">' + esc(updatedText) + '</td>' +
-            '<td class="tool-equal-col col-actions" title="编辑 / 删除">' +
-                '<div class="action-buttons action-buttons-compact">' +
-                    '<button class="btn-icon" data-action="edit" data-tool-id="' + escAttr(tool.id) + '" title="编辑" aria-label="编辑">' + icon('edit') + '</button>' +
+            '<td class="tool-equal-col tool-address-cell" title="' + escAttr(tool.id) + '">' +
+                '<button class="list-meta-link tool-id-link" type="button" data-tool-id="' + escAttr(tool.id) + '" title="' + escAttr(tool.id) + '" aria-label="打开工具 UUID ' + escAttr(tool.id) + ' 所在目录">' + esc(shortToolId(tool.id)) + '</button>' +
+            '</td>' +
+            '<td class="tool-equal-col tool-updated-cell" title="' + escAttr(updatedText) + '">' + esc(updatedText) + '</td>' +
+            '<td class="tool-equal-col col-actions" title="删除">' +
+                '<div class="action-buttons action-buttons-single">' +
                     '<button class="btn-icon" data-action="delete" data-tool-id="' + escAttr(tool.id) + '" title="删除" aria-label="删除">' + icon('trash') + '</button>' +
                 '</div>' +
             '</td>' +
@@ -798,14 +1220,10 @@ function renderTools(tools) {
         btn.addEventListener('click', function (e) {
             e.stopPropagation();
             var toolId = btn.getAttribute('data-tool-id');
-            var action = btn.getAttribute('data-action');
-            if (action === 'edit') {
-                viewToolEdit(toolId);
-            } else if (action === 'delete') {
-                deleteTool(toolId);
-            }
+            deleteTool(toolId);
         });
     });
+    tbody.querySelectorAll('.tool-id-link').forEach(bindToolIdLink);
 
     tbody.querySelectorAll('.tool-name-cell').forEach(function (cell) {
         cell.addEventListener('click', function () {
@@ -838,6 +1256,25 @@ function renderTools(tools) {
     updateToolBatchDeleteState();
 }
 
+function shortToolId(toolId) {
+    return toolId.length > 16 ? toolId.slice(0, 16) + '…' : toolId;
+}
+
+function bindToolIdLink(link) {
+    if (!link) return;
+    link.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearTimeout(toolNameClickTimer);
+        var toolId = link.getAttribute('data-tool-id');
+        if (toolId) openToolDir(toolId);
+    });
+    link.addEventListener('dblclick', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+}
+
 function renderToolDescriptionCell(cell, description) {
     cell.setAttribute('data-description', description || '');
     cell.innerHTML = description
@@ -846,7 +1283,9 @@ function renderToolDescriptionCell(cell, description) {
 }
 
 function renderToolNameCell(cell, name) {
+    var toolId = cell.getAttribute('data-tool-id') || '';
     cell.setAttribute('data-name', name || '');
+    cell.setAttribute('title', (name || '') + '\n' + toolId);
     cell.innerHTML = '<span class="tool-name">' + esc(name || '') + '</span>';
 }
 
@@ -964,13 +1403,17 @@ async function viewToolEdit(toolId) {
         var tool = data.tool;
         var detailHtml = tool.type === 'agent' ? renderAgentEditFields(tool) : renderScriptEditFields(tool);
         contentArea.innerHTML =
-            '<div class="breadcrumb">' +
-                '<button class="btn btn-sm" id="btn-tool-edit-back">' + icon('back') + '返回</button>' +
-                '<button class="btn btn-sm btn-primary" id="btn-tool-edit-save">' + icon('edit') + '保存</button>' +
-                '<span class="breadcrumb-title">编辑工具</span>' +
-                '<span class="type-pill type-' + escAttr(tool.type) + '">' + toolTypeLabel(tool.type) + '</span>' +
+            '<div class="breadcrumb tool-edit-header">' +
+                '<div class="tool-edit-header-left">' +
+                    '<button class="btn btn-sm" id="btn-tool-edit-back">' + icon('back') + '返回</button>' +
+                    '<button class="btn btn-sm btn-primary" id="btn-tool-edit-save">' + icon('edit') + '保存</button>' +
+                    '<span class="breadcrumb-meta tool-edit-file-meta" id="tool-edit-file-meta"></span>' +
+                '</div>' +
+                '<span class="breadcrumb-title tool-edit-header-title">编辑工具</span>' +
+                '<span class="type-pill type-' + escAttr(tool.type) + ' tool-edit-header-type">' + toolTypeLabel(tool.type) + '</span>' +
             '</div>' +
             detailHtml;
+        updateToolEditFileMeta(tool);
 
         createToolCodeEditor(
             tool.type === 'agent' ? 'tool-python-editor' : 'tool-script-editor',
@@ -982,36 +1425,58 @@ async function viewToolEdit(toolId) {
             saveToolEdit(tool);
         });
         if (tool.type === 'agent') {
+            var apiKeyVisibilityButton = document.getElementById('btn-api-key-visibility');
+            apiKeyVisibilityButton.addEventListener('click', toggleApiKeyVisibility);
+            apiKeyVisibilityButton.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    toggleApiKeyVisibility();
+                }
+            });
             document.getElementById('btn-tool-agent-test').addEventListener('click', function () {
                 testAgentTool(tool);
+            });
+            document.getElementById('btn-tool-agent-interrupt').addEventListener('click', interruptActiveToolRun);
+            document.getElementById('btn-agent-code-copy').addEventListener('click', function () {
+                copyTextToClipboard(getToolCodeValue());
             });
             document.getElementById('btn-agent-log-copy').addEventListener('click', function () {
                 var log = document.getElementById('tool-agent-test-log');
                 var text = log ? log.textContent : '';
-                navigator.clipboard.writeText(text).then(function () {
-                    showToast('已复制到剪贴板', 'success');
-                }).catch(function () {
-                    showToast('复制失败，请手动选择文本复制', 'error');
-                });
+                copyTextToClipboard(text);
             });
         } else {
             // Script 类型：运行和复制按钮
             document.getElementById('btn-tool-script-run').addEventListener('click', function () {
                 runScriptTool(tool);
             });
+            document.getElementById('btn-tool-script-interrupt').addEventListener('click', interruptActiveToolRun);
+            document.getElementById('btn-script-code-copy').addEventListener('click', function () {
+                copyTextToClipboard(getToolCodeValue());
+            });
             document.getElementById('btn-script-log-copy').addEventListener('click', function () {
                 var log = document.getElementById('tool-script-test-log');
                 var text = log ? log.textContent : '';
-                navigator.clipboard.writeText(text).then(function () {
-                    showToast('已复制到剪贴板', 'success');
-                }).catch(function () {
-                    showToast('复制失败，请手动选择文本复制', 'error');
-                });
+                copyTextToClipboard(text);
             });
         }
     } catch (e) {
         showToast('读取工具失败: ' + e.message, 'error');
     }
+}
+
+function toolEditFileMetaText(tool) {
+    var isModified = tool.updated_at && tool.updated_at !== tool.created_at;
+    var timestamp = isModified ? tool.updated_at : (tool.created_at || tool.updated_at || '');
+    return tool.id + (timestamp ? ' · ' + formatDateTime(timestamp) : '');
+}
+
+function updateToolEditFileMeta(tool) {
+    var meta = document.getElementById('tool-edit-file-meta');
+    if (!meta) return;
+    var text = toolEditFileMetaText(tool);
+    meta.textContent = text;
+    meta.setAttribute('title', text);
 }
 
 function renderAgentEditFields(tool) {
@@ -1048,7 +1513,16 @@ function renderAgentEditFields(tool) {
                             '</div>' +
                             '<div class="form-row-horizontal">' +
                                 '<label class="form-label-h" for="tool-api-key">api_key</label>' +
-                                '<input type="password" class="input" id="tool-api-key" placeholder="API Key" autocomplete="off" value="' + escAttr(tool.api_key || '') + '" />' +
+                                '<div class="api-key-input-wrap">' +
+                                    '<input type="password" class="input" id="tool-api-key" placeholder="API Key" autocomplete="off" value="' + escAttr(tool.api_key || '') + '" />' +
+                                    '<button class="api-key-visibility-btn" id="btn-api-key-visibility" type="button" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key">' +
+                                        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+                                            '<path d="M2.1 12s3.6-6 9.9-6 9.9 6 9.9 6-3.6 6-9.9 6-9.9-6-9.9-6Z"></path>' +
+                                            '<circle cx="12" cy="12" r="3"></circle>' +
+                                            '<path class="api-key-eye-slash" d="m4 4 16 16"></path>' +
+                                        '</svg>' +
+                                    '</button>' +
+                                '</div>' +
                             '</div>' +
                             '<div class="form-row-horizontal">' +
                                 '<label class="form-label-h" for="tool-base-url">base_url</label>' +
@@ -1068,7 +1542,10 @@ function renderAgentEditFields(tool) {
                     '</div>' +
                 '</section>' +
                 '<section class="edit-section agent-addl-section">' +
-                    '<div class="edit-section-title">Python 代码</div>' +
+                    '<div class="edit-section-title-row">' +
+                        '<div class="edit-section-title">Python 代码</div>' +
+                        '<button class="btn agent-log-copy-btn code-copy-btn" id="btn-agent-code-copy" type="button" title="复制代码">复制</button>' +
+                    '</div>' +
                     reviewNotice +
                     '<div class="python-code-editor" id="tool-python-editor" aria-label="Agent Python 代码编辑器"></div>' +
                 '</section>' +
@@ -1077,9 +1554,10 @@ function renderAgentEditFields(tool) {
                 '<section class="edit-section agent-test-card">' +
                     '<div class="edit-section-title">运行日志</div>' +
                     '<div class="agent-test-action-row">' +
-                        '<button class="btn btn-primary agent-test-button" id="btn-tool-agent-test" type="button">运行 Agent</button>' +
+                        '<button class="btn btn-primary agent-test-button" id="btn-tool-agent-test" type="button">运行</button>' +
+                        '<button class="btn btn-danger agent-interrupt-button" id="btn-tool-agent-interrupt" type="button" disabled>中断</button>' +
                         '<span class="agent-test-status" id="agent-test-status"></span>' +
-                        '<button class="agent-log-copy-btn" id="btn-agent-log-copy" type="button" title="复制">复制</button>' +
+                        '<button class="btn agent-log-copy-btn" id="btn-agent-log-copy" type="button" title="复制">复制</button>' +
                     '</div>' +
                     '<div class="agent-log-wrapper">' +
                         '<pre class="agent-test-log" id="tool-agent-test-log" aria-live="polite">等待运行...</pre>' +
@@ -1109,7 +1587,10 @@ function renderScriptEditFields(tool) {
                 '</section>' +
                 // 2. 脚本代码（独立卡片，撑满左栏剩余空间）
                 '<section class="edit-section agent-addl-section">' +
-                    '<div class="edit-section-title">脚本代码</div>' +
+                    '<div class="edit-section-title-row">' +
+                        '<div class="edit-section-title">脚本代码</div>' +
+                        '<button class="btn agent-log-copy-btn code-copy-btn" id="btn-script-code-copy" type="button" title="复制代码">复制</button>' +
+                    '</div>' +
                     '<div class="python-code-editor" id="tool-script-editor" aria-label="Script Python 代码编辑器"></div>' +
                 '</section>' +
             '</div>' +
@@ -1119,7 +1600,9 @@ function renderScriptEditFields(tool) {
                     '<div class="edit-section-title">调试</div>' +
                     '<div class="agent-test-action-row">' +
                         '<button class="btn btn-primary agent-test-button" id="btn-tool-script-run" type="button">运行</button>' +
-                        '<button class="agent-log-copy-btn" id="btn-script-log-copy" type="button" title="复制">复制</button>' +
+                        '<button class="btn btn-danger agent-interrupt-button" id="btn-tool-script-interrupt" type="button" disabled>中断</button>' +
+                        '<span class="agent-test-status" id="script-test-status"></span>' +
+                        '<button class="btn agent-log-copy-btn" id="btn-script-log-copy" type="button" title="复制">复制</button>' +
                     '</div>' +
                     '<div class="agent-log-wrapper">' +
                         '<pre class="agent-test-log" id="tool-script-test-log" aria-live="polite">等待运行...</pre>' +
@@ -1150,15 +1633,15 @@ async function saveToolEdit(tool) {
         script_code: '',
     };
     if (tool.type === 'agent') {
-        var agentParams = readAgentForm();
-        if (!agentParams) return;
-        Object.assign(body, agentParams);
+        Object.assign(body, readAgentForm());
     } else {
         body.script_code = getToolCodeValue();
     }
 
     try {
-        await API.put('/api/tools/' + encodeURIComponent(tool.id), body);
+        var data = await API.put('/api/tools/' + encodeURIComponent(tool.id), body);
+        if (data.tool) Object.assign(tool, data.tool);
+        updateToolEditFileMeta(tool);
         var reviewNotice = document.getElementById('agent-review-notice');
         if (reviewNotice) reviewNotice.remove();
         showToast('工具已保存', 'success');
@@ -1168,7 +1651,7 @@ async function saveToolEdit(tool) {
 }
 
 function readAgentForm() {
-    var body = {
+    return {
         model: document.getElementById('tool-model').value.trim(),
         model_provider: document.getElementById('tool-model-provider').value.trim(),
         api_key: document.getElementById('tool-api-key').value.trim(),
@@ -1177,6 +1660,35 @@ function readAgentForm() {
         human_message: document.getElementById('tool-human-message').value.trim(),
         python_code: getToolCodeValue(),
     };
+}
+
+function toggleApiKeyVisibility() {
+    var input = document.getElementById('tool-api-key');
+    var button = document.getElementById('btn-api-key-visibility');
+    if (!input || !button) return;
+
+    var visible = input.type === 'password';
+    input.type = visible ? 'text' : 'password';
+    button.classList.toggle('is-visible', visible);
+    button.setAttribute('aria-pressed', String(visible));
+    button.setAttribute('aria-label', visible ? '隐藏 API Key' : '显示 API Key');
+    button.setAttribute('title', visible ? '隐藏 API Key' : '显示 API Key');
+}
+
+function copyTextToClipboard(text) {
+    navigator.clipboard.writeText(text).then(function () {
+        showToast('已复制到剪贴板', 'success');
+    }).catch(function () {
+        showToast('复制失败，请手动选择文本复制', 'error');
+    });
+}
+
+function validateAgentRun(body) {
+    if (!body.python_code.trim()) {
+        showToast('Python 代码不能为空', 'error');
+        if (toolCodeEditor) toolCodeEditor.focus();
+        return null;
+    }
 
     var required = [
         ['model', 'model', 'tool-model'],
@@ -1186,48 +1698,244 @@ function readAgentForm() {
         ['human_message', 'human_message', 'tool-human-message'],
     ];
     for (var i = 0; i < required.length; i++) {
-        if (!body[required[i][0]]) {
+        var field = required[i][0];
+        var placeholderPattern = new RegExp('\\$\\{\\s*' + field + '\\s*\\}');
+        if (placeholderPattern.test(body.python_code) && !body[field]) {
             showToast(required[i][1] + ' 不能为空', 'error');
             document.getElementById(required[i][2]).focus();
             return null;
         }
-    }
-    if (!body.python_code.trim()) {
-        showToast('Python 代码不能为空', 'error');
-        if (toolCodeEditor) toolCodeEditor.focus();
-        return null;
     }
     return body;
 }
 
 async function testAgentTool(tool) {
     var body = readAgentForm();
-    if (!body) return;
+    if (!validateAgentRun(body)) return;
     var button = document.getElementById('btn-tool-agent-test');
+    var interruptButton = document.getElementById('btn-tool-agent-interrupt');
     var log = document.getElementById('tool-agent-test-log');
     var status = document.getElementById('agent-test-status');
-    button.disabled = true;
-    button.textContent = '运行中...';
-    if (status) { status.textContent = ''; status.className = 'agent-test-status'; }
+    var run = beginToolRun(button, interruptButton, status, log);
+    if (!run) return;
+    body.run_id = run.runId;
     if (log) log.innerHTML = '<span style="color:#9ca3af">正在编译并执行 Python 代码...</span>';
     try {
-        var result = await API.post('/api/tools/' + encodeURIComponent(tool.id) + '/test', body);
-        var logs = result.logs || '没有输出';
-        renderAgentLog(logs);
-        if (status) {
-            status.textContent = result.ok ? ('✓ ' + (result.latency_ms != null ? result.latency_ms + ' ms' : '')) : '✗ 运行失败';
-            status.className = 'agent-test-status ' + (result.ok ? 'status-ok' : 'status-err');
-        }
-        showToast(result.ok ? 'Agent 运行完成' : 'Agent 运行失败，请查看日志', result.ok ? 'success' : 'error');
+        var started = await API.post(
+            '/api/tools/' + encodeURIComponent(tool.id) + '/test/start',
+            body,
+            { signal: run.controller.signal }
+        );
+        if (!isCurrentToolRun(run) || run.interruptRequested) return;
+        run.runId = started.run_id;
+        connectToolRunStream(run, 'Agent');
     } catch (e) {
+        if (run.interruptRequested && e.name === 'AbortError') return;
+        if (!isCurrentToolRun(run)) return;
         var errText = 'Agent 运行失败: ' + e.message;
         if (log) log.textContent = errText;
-        if (status) { status.textContent = '✗ 运行失败'; status.className = 'agent-test-status status-err'; }
+        completeToolRun(run, 'failed');
         showToast('Agent 运行失败，请查看日志', 'error');
-    } finally {
-        button.disabled = false;
-        button.textContent = '运行 Agent';
     }
+}
+
+function createToolRunId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+}
+
+function formatRunSeconds(elapsedMs) {
+    return (Math.max(0, elapsedMs) / 1000).toFixed(1) + ' S';
+}
+
+function setToolRunStatus(status, outcome, elapsedMs) {
+    if (!status) return;
+    var elapsed = formatRunSeconds(elapsedMs);
+    status.className = 'agent-test-status status-' + outcome;
+    if (outcome === 'running') {
+        var elapsedNode = status.querySelector('.tool-run-elapsed');
+        if (!elapsedNode) {
+            status.innerHTML = '<span class="tool-run-spinner" aria-hidden="true"></span>' +
+                '<span class="tool-run-elapsed"></span>';
+            elapsedNode = status.querySelector('.tool-run-elapsed');
+        }
+        elapsedNode.textContent = elapsed;
+        status.setAttribute('aria-label', '运行中 ' + elapsed);
+        return;
+    }
+    var labels = {
+        ok: 'SUCCESS',
+        failed: 'FAILED',
+        interrupted: 'Interrupted',
+    };
+    status.textContent = (labels[outcome] || outcome) + ' ' + elapsed;
+    status.removeAttribute('aria-label');
+}
+
+function beginToolRun(button, interruptButton, status, log) {
+    if (activeToolRun) {
+        showToast('已有工具正在运行', 'error');
+        return null;
+    }
+    var run = {
+        runId: createToolRunId(),
+        button: button,
+        interruptButton: interruptButton,
+        status: status,
+        log: log,
+        controller: new AbortController(),
+        eventSource: null,
+        startedAt: performance.now(),
+        timer: null,
+        interruptRequested: false,
+        outputStarted: false,
+    };
+    activeToolRun = run;
+    button.disabled = true;
+    button.textContent = '运行';
+    interruptButton.disabled = false;
+    setToolRunStatus(status, 'running', 0);
+    run.timer = setInterval(function () {
+        if (isCurrentToolRun(run) && !run.interruptRequested) {
+            setToolRunStatus(status, 'running', performance.now() - run.startedAt);
+        }
+    }, 100);
+    return run;
+}
+
+function isCurrentToolRun(run) {
+    return activeToolRun === run;
+}
+
+function completeToolRun(run, outcome, serverLatencyMs) {
+    if (!isCurrentToolRun(run)) return;
+    clearInterval(run.timer);
+    if (run.eventSource) {
+        run.eventSource.close();
+        run.eventSource = null;
+    }
+    var elapsedMs = serverLatencyMs != null
+        ? Number(serverLatencyMs)
+        : performance.now() - run.startedAt;
+    setToolRunStatus(run.status, outcome, elapsedMs);
+    run.button.disabled = false;
+    run.button.textContent = '运行';
+    run.interruptButton.disabled = true;
+    activeToolRun = null;
+}
+
+async function interruptActiveToolRun() {
+    var run = activeToolRun;
+    if (!run || run.interruptRequested) return;
+    run.interruptRequested = true;
+    clearInterval(run.timer);
+    var elapsedMs = performance.now() - run.startedAt;
+    setToolRunStatus(run.status, 'interrupted', elapsedMs);
+    if (run.log) run.log.textContent = '执行已中断';
+    run.interruptButton.disabled = true;
+
+    try {
+        await API.post('/api/tools/runs/' + encodeURIComponent(run.runId) + '/interrupt', {});
+        run.controller.abort();
+        if (run.eventSource) {
+            run.eventSource.close();
+            run.eventSource = null;
+        }
+        completeToolRun(run, 'interrupted', elapsedMs);
+        showToast('工具执行已中断', 'success');
+    } catch (e) {
+        if (!isCurrentToolRun(run)) return;
+        run.interruptRequested = false;
+        run.interruptButton.disabled = false;
+        setToolRunStatus(run.status, 'running', performance.now() - run.startedAt);
+        run.timer = setInterval(function () {
+            if (isCurrentToolRun(run) && !run.interruptRequested) {
+                setToolRunStatus(run.status, 'running', performance.now() - run.startedAt);
+            }
+        }, 100);
+        showToast('中断失败: ' + e.message, 'error');
+    }
+}
+
+function appendToolRunLog(run, text) {
+    if (!run.log || !text || !isCurrentToolRun(run) || run.interruptRequested) return;
+    if (!run.outputStarted) {
+        run.log.textContent = '';
+        run.outputStarted = true;
+    }
+    run.log.appendChild(document.createTextNode(text));
+    run.log.scrollTop = run.log.scrollHeight;
+}
+
+function appendToolRunResult(run, result) {
+    if (!run.log) return;
+    if (Object.prototype.hasOwnProperty.call(result, 'response')) {
+        var responseText;
+        try {
+            responseText = JSON.stringify(result.response, null, 2);
+        } catch (e) {
+            responseText = String(result.response);
+        }
+        var existing = run.outputStarted ? run.log.textContent : '';
+        var separator = existing && !existing.endsWith('\n') ? '\n' : '';
+        appendToolRunLog(run, separator + 'response:\n' + responseText);
+    } else if (!run.outputStarted) {
+        run.log.textContent = '没有输出';
+        run.outputStarted = true;
+    }
+}
+
+function parseToolRunEvent(event) {
+    try {
+        return JSON.parse(event.data);
+    } catch (e) {
+        return null;
+    }
+}
+
+function connectToolRunStream(run, runtimeLabel) {
+    var source = new EventSource(
+        '/api/tools/runs/' + encodeURIComponent(run.runId) + '/events'
+    );
+    run.eventSource = source;
+
+    source.addEventListener('log', function (event) {
+        var payload = parseToolRunEvent(event);
+        if (payload) appendToolRunLog(run, String(payload.text || ''));
+    });
+
+    source.addEventListener('complete', function (event) {
+        if (!isCurrentToolRun(run) || run.interruptRequested) return;
+        var result = parseToolRunEvent(event);
+        if (!result) {
+            appendToolRunLog(run, '日志事件解析失败\n');
+            completeToolRun(run, 'failed');
+            return;
+        }
+        appendToolRunResult(run, result);
+        completeToolRun(run, result.ok ? 'ok' : 'failed', result.latency_ms);
+        showToast(
+            result.ok ? runtimeLabel + ' 运行完成' : runtimeLabel + ' 运行失败，请查看日志',
+            result.ok ? 'success' : 'error'
+        );
+    });
+
+    source.addEventListener('interrupted', function (event) {
+        if (!isCurrentToolRun(run)) return;
+        var result = parseToolRunEvent(event) || {};
+        if (run.log) run.log.textContent = '执行已中断';
+        completeToolRun(run, 'interrupted', result.latency_ms);
+    });
+
+    source.onerror = function () {
+        if (!isCurrentToolRun(run) || run.interruptRequested) return;
+        source.close();
+        appendToolRunLog(run, '实时日志连接失败\n');
+        completeToolRun(run, 'failed');
+        showToast(runtimeLabel + ' 实时日志连接失败', 'error');
+    };
 }
 
 /* ===== Script 运行 ===== */
@@ -1239,25 +1947,31 @@ async function runScriptTool(tool) {
         return;
     }
     var button = document.getElementById('btn-tool-script-run');
+    var interruptButton = document.getElementById('btn-tool-script-interrupt');
     var log = document.getElementById('tool-script-test-log');
-    button.disabled = true;
-    button.textContent = '运行中...';
-    if (log) log.innerHTML = '<span style="color:#9ca3af">正在执行脚本...</span>';
+    var status = document.getElementById('script-test-status');
+    var run = beginToolRun(button, interruptButton, status, log);
+    if (!run) return;
+    if (log) log.innerHTML = '<span style="color:#9ca3af">正在独立子进程执行 Python 代码...</span>';
     try {
-        var result = await API.post('/api/tools/' + encodeURIComponent(tool.id) + '/run', { script_code: code });
-        var logs = result.logs || '没有输出';
-        if (log) log.textContent = logs;
-        showToast(result.ok ? 'Script 运行完成' : 'Script 运行失败，请查看日志', result.ok ? 'success' : 'error');
+        var started = await API.post(
+            '/api/tools/' + encodeURIComponent(tool.id) + '/run/start',
+            { script_code: code, run_id: run.runId },
+            { signal: run.controller.signal }
+        );
+        if (!isCurrentToolRun(run) || run.interruptRequested) return;
+        run.runId = started.run_id;
+        connectToolRunStream(run, 'Script');
     } catch (e) {
+        if (run.interruptRequested && e.name === 'AbortError') return;
+        if (!isCurrentToolRun(run)) return;
         if (log) log.textContent = 'Script 运行失败: ' + e.message;
+        completeToolRun(run, 'failed');
         showToast('Script 运行失败，请查看日志', 'error');
-    } finally {
-        button.disabled = false;
-        button.textContent = '运行';
     }
 }
 
-/* ===== Agent 日志渲染：ANSI 染色 ===== */
+/* ===== Python 日志渲染：ANSI 染色 ===== */
 
 /** 将 ANSI 256 色索引转为 hex 颜色 */
 function ansi256ToHex(n) {
@@ -1314,8 +2028,8 @@ function ansiToHtml(text) {
 }
 
 /** 将日志文本渲染到日志区域（纯文本，不做染色） */
-function renderAgentLog(text) {
-    var log = document.getElementById('tool-agent-test-log');
+function renderPythonLog(text) {
+    var log = document.getElementById('tool-agent-test-log') || document.getElementById('tool-script-test-log');
     if (!log) return;
     log.textContent = text;
 }
@@ -1343,6 +2057,10 @@ function getCheckedToolIds() {
 
 function updateToolBatchDeleteState() {
     var checkedIds = getCheckedToolIds();
+    var exportBtn = document.getElementById('btn-tool-export-batch');
+    if (exportBtn) {
+        exportBtn.innerHTML = icon('export') + (checkedIds.length > 0 ? '导出 ' + checkedIds.length : '导出');
+    }
     var deleteBtn = document.getElementById('btn-tool-delete-batch');
     if (deleteBtn) {
         deleteBtn.disabled = checkedIds.length === 0;
@@ -1355,6 +2073,15 @@ function updateToolBatchDeleteState() {
         checkAll.checked = visibleIds.length > 0 && checkedVisible.length === visibleIds.length;
         checkAll.indeterminate = checkedVisible.length > 0 && checkedVisible.length < visibleIds.length;
     }
+}
+
+async function exportCheckedTools() {
+    var checkedIds = getCheckedToolIds();
+    if (checkedIds.length > 0) {
+        await downloadToolArchive(checkedIds);
+        return;
+    }
+    document.getElementById('tool-export-overlay').classList.remove('hidden');
 }
 
 async function deleteCheckedTools() {
@@ -1618,6 +2345,28 @@ document.getElementById('btn-delete-confirm').addEventListener('click', async fu
     showToast('已删除 ' + deleted + ' 个' + (failed > 0 ? '，失败 ' + failed + ' 个' : ''), failed > 0 ? 'error' : 'success');
     setsPage = 1;
     await loadSets();
+});
+
+/* ========================================================================
+   Tool Export Modal
+   ======================================================================== */
+var toolExportOverlay = document.getElementById('tool-export-overlay');
+
+function closeToolExportModal() {
+    toolExportOverlay.classList.add('hidden');
+}
+
+document.getElementById('btn-tool-export-cancel').addEventListener('click', closeToolExportModal);
+toolExportOverlay.addEventListener('click', function (e) {
+    if (e.target === toolExportOverlay) closeToolExportModal();
+});
+
+document.getElementById('btn-tool-export-confirm').addEventListener('click', async function () {
+    var button = document.getElementById('btn-tool-export-confirm');
+    button.disabled = true;
+    await downloadToolArchive([]);
+    button.disabled = false;
+    closeToolExportModal();
 });
 
 /* ========================================================================

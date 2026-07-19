@@ -1,9 +1,10 @@
 [project]
 name = "agent-bench"
 version = "0.1.0"
-description = "Local Excel test set management web app"
+description = "Local enterprise Agent testing and workflow orchestration app"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.75,<1",
     "fastapi>=0.115,<1",
     "httpx[socks]>=0.28,<1",
     "langchain>=1.0,<2",
@@ -30,3 +31,6 @@ dev = [
 addopts = "--basetemp=.pytest_tmp"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live: runs the DeepSeek and DashScope Web CRUD/SSE tool matrix; Agent rows require provider API key environment variables",
+]
