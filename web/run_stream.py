@@ -1,4 +1,4 @@
-"""In-memory event streams for local Script and Agent executions."""
+"""In-memory event streams for local tool template executions."""
 
 from __future__ import annotations
 

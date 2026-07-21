@@ -7,11 +7,9 @@ from fastapi.staticfiles import StaticFiles
 from web.routes_config import router as config_router
 from web.routes_excel import router as excel_router
 from web.routes_files import router as files_router
-from web.routes_runs import router as runs_router
 from web.routes_testcases import router as testcases_router
 from web.routes_targets import router as targets_router
-from web.routes_tools import router as tools_router
-from web.routes_workflows import router as workflows_router
+from web.routes_tool_templates import router as tool_templates_router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -28,11 +26,9 @@ def create_app() -> FastAPI:
     app.include_router(excel_router)
     app.include_router(config_router)
     app.include_router(files_router)
-    app.include_router(runs_router)
     app.include_router(testcases_router)
     app.include_router(targets_router)
-    app.include_router(tools_router)
-    app.include_router(workflows_router)
+    app.include_router(tool_templates_router)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
     # 静态文件 — 显式路由，避免 StaticFiles mount 拦截 API 的 PUT/DELETE
@@ -63,6 +59,11 @@ def create_app() -> FastAPI:
     async def execution_js():
         """返回运行编排前端逻辑。"""
         return FileResponse(STATIC_DIR / "execution.js", headers=_NO_CACHE)
+
+    @app.get("/tool-templates.js")
+    async def tool_templates_js():
+        """返回工具模板管理前端逻辑。"""
+        return FileResponse(STATIC_DIR / "tool-templates.js", headers=_NO_CACHE)
 
     return app
 

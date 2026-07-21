@@ -7,17 +7,17 @@ from pydantic import BaseModel
 
 from execution import (
     DEFAULT_DATABASE_PATH,
-    RunRepository,
-    RunRepositoryError,
     TargetConfiguration,
     TargetRecord,
+    TargetRepository,
+    TargetRepositoryError,
 )
 
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
 
 DATABASE_PATH = DEFAULT_DATABASE_PATH
-_repository_instance: RunRepository | None = None
+_repository_instance: TargetRepository | None = None
 _repository_path: Path | None = None
 
 
@@ -29,12 +29,12 @@ class TargetListResponse(BaseModel):
     targets: list[TargetRecord]
 
 
-def _get_repository() -> RunRepository:
+def _get_repository() -> TargetRepository:
     """返回当前数据库路径对应的仓储，允许测试隔离临时数据库。"""
     global _repository_instance, _repository_path
     path = Path(DATABASE_PATH).resolve()
     if _repository_instance is None or _repository_path != path:
-        _repository_instance = RunRepository(path)
+        _repository_instance = TargetRepository(path)
         _repository_path = path
     return _repository_instance
 
@@ -59,7 +59,7 @@ def create_target(body: TargetConfiguration) -> TargetEnvelope:
         target = _get_repository().create_target(
             TargetRecord(**body.model_dump(mode="json"))
         )
-    except RunRepositoryError as exc:
+    except TargetRepositoryError as exc:
         raise HTTPException(400, str(exc)) from exc
     return TargetEnvelope(target=target)
 
@@ -84,7 +84,7 @@ def update_target(
     )
     try:
         saved = _get_repository().update_target(updated)
-    except RunRepositoryError as exc:
+    except TargetRepositoryError as exc:
         raise HTTPException(400, str(exc)) from exc
     return TargetEnvelope(target=saved)
 

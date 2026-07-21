@@ -1,15 +1,12 @@
-import sqlite3
-
 import pytest
 from fastapi.testclient import TestClient
 
 from execution import (
-    RunRepository,
-    RunRepositoryError,
     TargetHttpMethod,
     TargetRecord,
+    TargetRepository,
+    TargetRepositoryError,
 )
-from execution.repository import SCHEMA_VERSION
 from web import routes_targets
 from web.app import app
 
@@ -35,61 +32,24 @@ def _patch_database(tmp_path, monkeypatch):
     return database_path
 
 
-def test_v1_database_is_migrated_to_targets_without_losing_runs(tmp_path):
+def test_target_repository_initializes_without_workflow_or_run_schema(tmp_path):
     database_path = tmp_path / "agent_bench.sqlite3"
-    with sqlite3.connect(database_path, isolation_level=None) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute("BEGIN IMMEDIATE")
-        RunRepository._apply_v1(connection)
-        connection.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (1, 'v1')"
-        )
-        connection.execute(
-            """
-            INSERT INTO runs(
-                id, testset_filename, sheet_name, status, parameters_json,
-                snapshot_json, cancel_requested, created_at, updated_at
-            ) VALUES ('old-run', 'cases.xlsx', 'Sheet1', 'QUEUED', '{}', '{}', 0,
-                      '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z')
-            """
-        )
-        connection.commit()
-
-    repository = RunRepository(database_path)
+    repository = TargetRepository(database_path)
     repository.initialize()
-    repository.create_target(TargetRecord(**_body(), id="target-after-upgrade"))
+    repository.create_target(TargetRecord(**_body(), id="target-1"))
 
-    assert repository.schema_version() == SCHEMA_VERSION == 5
-    assert repository.get_run("old-run") is not None
-    assert repository.get_target("target-after-upgrade") is not None
-    with sqlite3.connect(database_path) as connection:
-        versions = [
-            row[0]
-            for row in connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version"
-            )
-        ]
-    assert versions == [1, 2, 3, 4, 5]
+    assert repository.get_target("target-1") is not None
 
 
 def test_target_repository_crud_duplicate_names_and_restart_round_trip(tmp_path):
     database_path = tmp_path / "agent_bench.sqlite3"
-    repository = RunRepository(database_path)
+    repository = TargetRepository(database_path)
     first = repository.create_target(TargetRecord(id="target-1", **_body()))
     second = repository.create_target(
         TargetRecord(id="target-2", **_body(headers={"Authorization": "plain-secret"}))
     )
 
-    restarted = RunRepository(database_path)
+    restarted = TargetRepository(database_path)
     restored = restarted.get_target(first.id)
     assert restored is not None
     assert restored.name == "企业 Agent 测试环境"
@@ -115,7 +75,7 @@ def test_target_repository_crud_duplicate_names_and_restart_round_trip(tmp_path)
     assert updated.method == TargetHttpMethod.POST
     assert updated.target_total_concurrency == 9
 
-    with pytest.raises(RunRepositoryError, match="UNIQUE"):
+    with pytest.raises(TargetRepositoryError, match="UNIQUE"):
         restarted.create_target(TargetRecord(id=first.id, **_body()))
     assert restarted.delete_target(first.id) is True
     assert restarted.delete_target(first.id) is False
@@ -167,7 +127,7 @@ def test_target_api_complete_crud_and_duplicate_names(tmp_path, monkeypatch):
 
     routes_targets._repository_instance = None
     routes_targets._repository_path = None
-    assert RunRepository(database_path).get_target(created["id"]).headers == {
+    assert TargetRepository(database_path).get_target(created["id"]).headers == {
         "Authorization": "Bearer secret"
     }
     assert client.get(f"/api/targets/{created['id']}").json()["target"] == updated
