@@ -828,6 +828,75 @@ T13.2.1-T13.2.6 已完成
 - 未覆盖与风险：没有真实供应商 API Key，因此不得宣称新 AGENT/LLM Worker 已通过 DeepSeek/Qwen live 验证；Workflow 持久化、DAG 执行、Run 追溯和独立凭据仓储仍未实现，必须先完成第 16 节业务规则确认。
 - 价值验证：新手可从四类模板复制完整定义到画布后少量修改，画布个性化节点也可发布为独立模板；两者无来源绑定，模板删除、更新或同名均不会改变既有画布节点。
 
+### Step 10：模型管理（in progress，2026-07-21）
+
+#### 业务背景与目标（Why）
+
+- Agent Bench 当前需要在 LLM、AGENT 和其他模型调用场景中反复填写供应商连接；本功能集中管理供应商、BASE_URL、API Key 和已选模型，减少重复配置并为后续画布节点选择模型提供稳定数据源。
+- 当前阶段不建设供应商插件生态或深度 SDK 适配，只支持 OpenAI-compatible 与 Anthropic 模型发现；Header Override、Body Override 和导入导出继续延后。
+
+#### 用户与真实场景（Who & Where）
+
+- 本机 Workflow / Agent 作者从左侧一级导航进入“模型管理”，搜索和维护已有供应商连接。
+- 点击“新增模型”进入独立新增页面，完成测速、获取模型、选择多个模型并保存；编辑时复用同一页面和完整配置。
+- 一条记录代表一个供应商连接及其多个已选模型，同名供应商允许由独立 ID 区分。
+
+#### 已确认规则与优先级（What & When）
+
+- P0：供应商列表、新增、编辑、删除、搜索、BASE_URL 测速、模型发现、手工模型兜底和重启后持久化。
+- 供应商名称、官网链接选填；API Key、BASE_URL 必填；至少添加一个模型后才能保存。
+- API Key 明文保存在本机 SQLite；列表页不展示 Key，编辑页按用户选择完整回显。不得把真实 Key 写入代码、测试、文档、日志或 Git。
+- 协议探测复用已验证的 OpenAI Bearer 与 Anthropic `x-api-key` 逻辑；模型端点支持完整版本路径与 `/v1/models`、`/models` 补全。
+- Header Override、Body Override、凭据加密/绑定和导入导出不在本批实现范围，继续保留在待优化项。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 输入 | 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|---|
+| Step 10.1 | 本地持久化与 API | 已确认字段和模型发现原型 | SQLite Repository；CRUD、测速、模型发现 API | Repository 重启回读；API CRUD；Stub 真实 HTTP；非法 URL/响应和密钥不进入错误信息 | 无 |
+| Step 10.2 | 一级导航、列表和新增/编辑页 | Step 10.1 API；独立原型视觉 | 模型管理列表、搜索、独立表单、连接状态、模型选择和删除确认 | 前端契约测试；JS 语法；桌面浏览器新增/编辑/搜索/删除 | Step 10.1 |
+| Step 10.3 | 集成验收与发布 | 完成的前后端 | E2E 记录、全量回归、更新计划并推送 | `pytest`、`npm run build`、Python/JS 静态检查、真实浏览器业务流、密钥扫描 | Step 10.1-10.2 |
+
+#### 验收标准与价值验证（How to Measure）
+
+- 左侧“模型管理”可稳定进入，新增按钮打开独立页面，布局与供应商连接原型一致且适配现有明暗主题。
+- 使用本地 OpenAI-compatible Stub 完成测速、模型发现、选择多个模型、保存、列表回读、编辑和删除；页面无横向溢出、控件重叠或控制台错误。
+- 服务重启后供应商、官网、BASE_URL、完整 API Key 和模型列表保持一致；列表和普通错误响应不泄露 API Key。
+- 受影响专项测试、前端构建、静态检查和全量回归全部通过后才能标记完成。
+
+#### Step 10.1：模型供应商持久化与 API（completed）
+
+- 持久化：复用被 Git 忽略的 `run_storage/agent_bench.sqlite3`，新增独立 `model_providers` 表；一条记录保存可选名称/官网、完整 API Key、BASE_URL、协议、模型端点和多个模型。
+- API：新增供应商列表、创建、单条读取、完整更新、删除、BASE_URL 测速和模型发现接口；列表与删除响应使用不含 API Key 的摘要，单条编辑接口按已确认的 3B 完整回显。
+- 协议探测：支持 OpenAI Bearer 与 Anthropic `x-api-key`，自动处理根 BASE_URL、版本化 `/v1` 路径以及 chat/responses/messages 完整端点；失败允许前端进入手工模型模式。
+- 安全边界：BASE_URL 拒绝非 HTTP(S)、内嵌用户名密码、query、fragment 和非法端口；上游错误只返回协议、端点、HTTP 状态或异常类型，不返回请求 Header、响应正文或 API Key。
+- 验证：`uv run pytest tests/test_model_providers.py -q` 结果 `13 passed, 1 warning`；覆盖 Repository 重启回读、完整 CRUD、列表密钥剥离、字段校验、端点归一化、真实本地 OpenAI-compatible HTTP 探测和错误密钥扫描。
+- 静态检查：新增后端与测试通过 `py_compile`，相关文件 `git diff --check` 通过；warning 为既有 Starlette/httpx 弃用提示。
+- 依赖结论：Step 10.1 已通过，可以开始 Step 10.2 前端；尚未接入一级导航或页面。
+
+#### Step 10.2：一级导航、模型列表和新增/编辑页（completed）
+
+- 导航与资产：左侧一级导航新增“模型管理”；新增独立 `model-providers.js/css`，静态资源使用显式无缓存 GET 路由，不把模型业务继续堆入 `app.js`。
+- 管理列表：支持新增、刷新、供应商/地址/协议/模型前端搜索、名称进入编辑、官网跳转、协议与模型摘要、更新时间、编辑和删除；API Key 不进入列表响应和 DOM。
+- 新增/编辑页：复用供应商连接原型的双列表单、连接状态带、测速、模型发现、下拉选择、手工模型兜底和已选模型列表；增加保存/返回，编辑页按已确认 3B 完整回显 API Key。
+- 主题和布局：全部颜色复用现有语义变量并提供协议状态的暗色覆盖；仅实现桌面布局。首次 `1440x900` 截图发现时间内容把操作列推入表格内部滚动区，已改为固定列布局，复测操作按钮完整可见、页面与表格横向溢出均为 0。
+- 浏览器 E2E：在 8026 Agent Bench 与 8027 本地 OpenAI-compatible Stub 中完成左侧导航、新增、HTTP 200 测速、发现 3 个模型、选择 `deepseek-chat / qwen-max`、保存、无结果/模型名搜索、编辑页密钥完整回显、名称更新、服务重启后 SQLite 回读和页面删除清理。
+- E2E 修复：刷新首页发现既有 `viewSets()` 引用已删除的 `setSortMark` 导致主区为空；补回最小排序标记函数并新增回归测试。全新浏览器标签复测测试集首屏与模型管理均可渲染，控制台错误为 0。
+- 专项验证：模型后端、前端、主题和 Web 入口组合结果 `22 passed, 1 warning`；E2E 修复后的集合页/模型页组合结果 `22 passed, 1 warning`；JavaScript/Python 语法和相关 `git diff --check` 通过。
+- 数据清理：E2E 模型供应商已从 SQLite 删除；列表恢复为 0 个供应商。8027 Stub 将在最终回归后关闭，8026 Agent Bench 保留为交付服务。
+- 依赖结论：Step 10.2 已通过，可以开始 Step 10.3 全量回归、计划收口和发布。
+
+#### Step 10.3：集成验收与发布（completed）
+
+- 全量回归：`uv run pytest -q` 结果 `123 passed, 1 warning`，耗时 12.47 秒；warning 为既有 Starlette/httpx 弃用提示。
+- 生产构建：`npm run build` 成功，Workflow JavaScript/CSS bundle 正常生成。
+- 静态检查：`execution/`、`web/` 通过 Python `compileall`；`app.js / model-providers.js / tool-templates.js / execution.js` 通过 `node --check`；全仓 `git diff --check` 通过。
+- 安全扫描：带令牌边界的真实 `sk-` Key 形态扫描为零命中。初次宽泛扫描命中的 `sk-background / sk-stroke` 均为 Workflow bundle 中 CSS 标识片段，不是凭据。
+- 数据与服务：SQLite 中 E2E 供应商数量为 0；本地 Stub 8027 已关闭；集成后的 Agent Bench 服务保留在 `http://127.0.0.1:8026/`，首页与模型管理均返回正常。
+- 最终价值验证：用户可以从一级导航集中管理供应商连接，通过 API Key + BASE_URL 自动发现模型或手工添加，保存多个模型并在重启后继续编辑；列表不暴露密钥，编辑页按明确选择完整回显。
+- 已知风险：API Key 当前按用户选择在本机 SQLite 明文保存并在编辑页完整回显；任何能访问该本机 Web 页或数据库的用户都可读取。凭据加密、绑定和脱敏仍属于第 22.1 节待优化项。
+- 结论：Step 10 全部验收通过，可以提交并推送当前分支。
+
 ## 22. 待优化项目
 
 ### 22.1 独立凭据仓储与绑定

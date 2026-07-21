@@ -23,6 +23,14 @@ def test_set_storage_identifiers_open_their_existing_directories():
     assert ".action-buttons-single" in style_css
 
 
+def test_set_list_declares_its_sort_marker_before_initial_render():
+    app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "function setSortMark(field)" in app_js
+    assert "setsSortDir === 'asc' ? '▲' : '▼'" in app_js
+    assert app_js.index("function setSortMark(field)") < app_js.index("function viewSets()")
+
+
 def test_set_editor_uses_one_row_fields_and_compact_header_metadata():
     app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     style_css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
