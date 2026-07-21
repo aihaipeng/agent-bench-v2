@@ -8,9 +8,23 @@ from execution.targets import (
     TargetRepository,
     TargetRepositoryError,
 )
+from execution.model_providers import (
+    ModelProviderConfiguration,
+    ModelProviderProtocol,
+    ModelProviderRecord,
+    ModelProviderRepository,
+    ModelProviderRepositoryError,
+    ModelProviderSummary,
+)
 
 __all__ = [
     "DEFAULT_DATABASE_PATH",
+    "ModelProviderConfiguration",
+    "ModelProviderProtocol",
+    "ModelProviderRecord",
+    "ModelProviderRepository",
+    "ModelProviderRepositoryError",
+    "ModelProviderSummary",
     "TargetConfiguration",
     "TargetHttpMethod",
     "TargetRecord",

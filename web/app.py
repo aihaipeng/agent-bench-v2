@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from web.routes_config import router as config_router
 from web.routes_excel import router as excel_router
 from web.routes_files import router as files_router
+from web.routes_model_providers import router as model_providers_router
 from web.routes_testcases import router as testcases_router
 from web.routes_targets import router as targets_router
 from web.routes_tool_templates import router as tool_templates_router
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
     app.include_router(excel_router)
     app.include_router(config_router)
     app.include_router(files_router)
+    app.include_router(model_providers_router)
     app.include_router(testcases_router)
     app.include_router(targets_router)
     app.include_router(tool_templates_router)
@@ -64,6 +66,16 @@ def create_app() -> FastAPI:
     async def tool_templates_js():
         """返回工具模板管理前端逻辑。"""
         return FileResponse(STATIC_DIR / "tool-templates.js", headers=_NO_CACHE)
+
+    @app.get("/model-providers.css")
+    async def model_providers_css():
+        """返回模型管理样式。"""
+        return FileResponse(STATIC_DIR / "model-providers.css", headers=_NO_CACHE)
+
+    @app.get("/model-providers.js")
+    async def model_providers_js():
+        """返回模型管理前端逻辑。"""
+        return FileResponse(STATIC_DIR / "model-providers.js", headers=_NO_CACHE)
 
     return app
 

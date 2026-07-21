@@ -73,6 +73,11 @@ var casesPageSize = 50;
 var importFiles = [];
 var nameClickTimer = null;
 
+function setSortMark(field) {
+    if (setsSortBy !== field) return '';
+    return '<span aria-hidden="true">' + (setsSortDir === 'asc' ? '▲' : '▼') + '</span>';
+}
+
 var FAQ_ITEMS = [
     {
         category: '安装',
@@ -302,6 +307,8 @@ document.querySelector('.sidebar-nav').addEventListener('click', function (e) {
         viewSets();
     } else if (view === 'targets') {
         viewTargets();
+    } else if (view === 'models') {
+        viewModelProviders();
     } else if (view === 'tools') {
         viewToolTemplates();
     } else if (view === 'workflows') {
