@@ -112,6 +112,7 @@ lucide-react/dist/esm/icons/sparkles.js:
 lucide-react/dist/esm/icons/trash-2.js:
 lucide-react/dist/esm/icons/undo-2.js:
 lucide-react/dist/esm/icons/upload.js:
+lucide-react/dist/esm/icons/variable.js:
 lucide-react/dist/esm/icons/wand-sparkles.js:
 lucide-react/dist/esm/icons/x.js:
 lucide-react/dist/esm/icons/zap.js:

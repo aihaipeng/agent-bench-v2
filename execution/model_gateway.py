@@ -97,3 +97,84 @@ async def invoke_openai_compatible(
     finally:
         if owns_client:
             await active_client.aclose()
+
+
+def parse_openai_compatible_response(
+    response: httpx.Response,
+    *,
+    stream: bool,
+) -> dict[str, Any]:
+    """Extract final output and usage from buffered JSON or SSE responses."""
+
+    if stream:
+        return _parse_streaming_response(response.text)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError("模型响应不是合法 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("模型响应必须是 JSON 对象")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("模型响应缺少 choices")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("模型响应缺少 message")
+    output = message.get("content")
+    if output in (None, ""):
+        output = message.get("reasoning_content")
+    if output in (None, ""):
+        output = deepcopy(message)
+    usage = payload.get("usage")
+    return {
+        "output": deepcopy(output),
+        "usage": deepcopy(usage) if isinstance(usage, dict) else None,
+        "finish_reason": choice.get("finish_reason"),
+    }
+
+
+def _parse_streaming_response(body: str) -> dict[str, Any]:
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    usage: dict[str, Any] | None = None
+    finish_reason: Any = None
+    event_count = 0
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = httpx.Response(200, content=data).json()
+        except ValueError as exc:
+            raise ValueError("流式模型响应包含非法 JSON 事件") from exc
+        if not isinstance(payload, dict):
+            continue
+        event_count += 1
+        if isinstance(payload.get("usage"), dict):
+            usage = deepcopy(payload["usage"])
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason") or finish_reason
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        if isinstance(delta.get("content"), str):
+            content_parts.append(delta["content"])
+        if isinstance(delta.get("reasoning_content"), str):
+            reasoning_parts.append(delta["reasoning_content"])
+    if event_count == 0:
+        raise ValueError("流式模型响应不包含 data 事件")
+    output = "".join(content_parts) or "".join(reasoning_parts)
+    if not output:
+        raise ValueError("流式模型响应没有输出内容")
+    return {
+        "output": output,
+        "usage": usage,
+        "finish_reason": finish_reason,
+    }

@@ -49,6 +49,7 @@ import {
     Upload,
     WandSparkles,
     Undo2,
+    Variable,
     X,
     Zap,
 } from 'lucide-react';
@@ -68,6 +69,7 @@ const INSERTABLE_TYPES = ['HTTP', 'AGENT', 'LLM', 'SCRIPT'];
 const NODE_STATUSES = ['PENDING', 'RUNNING', 'PASSED', 'FAILED'];
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 const HTTP_BODY_TYPES = ['none', 'form-data', 'x-www-form-urlencoded', 'raw', 'binary'];
+const OUTPUT_VARIABLE_TYPES = ['AUTO', 'STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'OBJECT', 'ARRAY'];
 const DEFAULT_MAIN_PY = 'response = inputs';
 
 function nodeId(type) {
@@ -81,6 +83,13 @@ function rowId() {
 function formatExecutionDuration(value) {
     const durationMs = Math.max(0, Math.round(Number(value) || 0));
     return durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+}
+
+function formatRunDate(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-- --:--:--';
+    const pad = (part) => String(part).padStart(2, '0');
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function cloneValue(value) {
@@ -119,8 +128,50 @@ function parameterDataSummary(value) {
     return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return;
+        } catch (_error) {
+            // Some embedded browsers expose Clipboard API but deny write permission.
+        }
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    let copied = false;
+    try {
+        textarea.focus();
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        copied = document.execCommand('copy');
+    } finally {
+        textarea.remove();
+    }
+    if (!copied) throw new Error('浏览器拒绝了复制操作');
+}
+
+function runResultSummary(run) {
+    if (run.status === 'RUNNING') {
+        const liveText = typeof run.response_body === 'string'
+            ? run.response_body.replace(/\s+/g, ' ').trim()
+            : '';
+        if (!liveText) return '正在接收原始响应…';
+        return liveText.length > 160 ? `${liveText.slice(0, 157)}...` : liveText;
+    }
+    const value = run.status === 'FAILED' ? run.error?.message : run.output;
+    const text = parameterDataText(value).replace(/\s+/g, ' ').trim();
+    if (!text) return '无最终结果';
+    return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
 function emptyMappingRow() {
-    return {id: rowId(), name: '', value: ''};
+    return {id: rowId(), name: '', type: 'AUTO', value: ''};
 }
 
 function emptyKeyValueRow(key = '', value = '') {
@@ -250,8 +301,14 @@ function makeNode(type, position, overrides = {}) {
             outputVariables: [emptyMappingRow()],
             parameterRecords: [],
             ...(type === 'HTTP' ? {httpConfig: defaultHttpConfig()} : {}),
-            ...(type === 'LLM' ? {providerId: '', modelName: '', modelParameters: {}} : {}),
-            ...(meta.executable ? {mainPy: DEFAULT_MAIN_PY} : {}),
+            ...(type === 'LLM' ? {
+                providerId: '',
+                modelName: '',
+                systemPrompt: '',
+                userPrompt: '',
+                modelParameters: {},
+            } : {}),
+            ...(['AGENT', 'SCRIPT'].includes(type) ? {mainPy: DEFAULT_MAIN_PY} : {}),
             ...overrides,
         },
     };
@@ -303,6 +360,53 @@ function initialGraph() {
     };
 }
 
+function graphFromDraft(draft) {
+    if (!draft?.nodes?.length) return initialGraph();
+    const nodes = draft.nodes.map((stored) => {
+        const type = stored.data?.nodeType || 'SCRIPT';
+        const defaults = makeNode(type, stored.position || {x: 0, y: 0});
+        return {
+            ...defaults,
+            ...cloneValue(stored),
+            id: stored.id,
+            position: cloneValue(stored.position || {x: 0, y: 0}),
+            data: {
+                ...defaults.data,
+                ...cloneValue(stored.data || {}),
+                status: 'PENDING',
+                executionDurationMs: 0,
+                runHistory: [],
+                executionId: null,
+                isDirty: false,
+            },
+        };
+    });
+    return {nodes, edges: cloneValue(draft.edges || [])};
+}
+
+function serializableNode(node) {
+    const data = cloneValue(node.data || {});
+    for (const key of ('status executionDurationMs runHistory executionId savedAt isDirty'.split(' '))) {
+        delete data[key];
+    }
+    return {
+        id: node.id,
+        type: node.type || 'workflowNode',
+        position: cloneValue(node.position),
+        data,
+    };
+}
+
+function serializableEdge(edge) {
+    return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: edge.type || 'insertable',
+        markerEnd: cloneValue(edge.markerEnd || {}),
+    };
+}
+
 function WorkflowNode({data, selected}) {
     const meta = NODE_TYPES[data.nodeType] || NODE_TYPES.SCRIPT;
     const Icon = meta.icon;
@@ -323,7 +427,7 @@ function WorkflowNode({data, selected}) {
             <footer className="wf-node-footer">
                 <span className={`wf-node-status is-${statusClass}`}><i />{status}</span>
                 <span className="wf-node-meta">
-                    {meta.executable && <span className="wf-node-runtime">Python</span>}
+                    {meta.executable && <span className="wf-node-runtime">{data.nodeType === 'LLM' ? 'Gateway' : 'Python'}</span>}
                     {data.savedAt && !data.isDirty && <span className="wf-node-saved-state"><Check size={10} />已保存</span>}
                     <span className={`wf-node-execution is-${statusClass}`} aria-label={`执行耗时 ${executionDuration}`}>
                         <LoaderCircle className="wf-execution-spinner" size={12} />
@@ -506,12 +610,50 @@ function ModelSelector({
     );
 }
 
+function LlmRunHistory({runs}) {
+    const [expandedRunId, setExpandedRunId] = useState(null);
+    if (!runs.length) return <div className="wf-node-log-empty">暂无运行日志</div>;
+    return (
+        <div className="wf-llm-run-list">
+            {runs.slice(0, 10).map((run) => {
+                const expanded = expandedRunId === run.id;
+                const rawContent = run.response_body
+                    || run.error?.traceback
+                    || run.error?.message
+                    || '';
+                return (
+                    <article className={`wf-llm-run is-${String(run.status || 'FAILED').toLowerCase()}`} key={run.id}>
+                        <button type="button" className="wf-llm-run-summary" aria-expanded={expanded} onClick={() => setExpandedRunId(expanded ? null : run.id)}>
+                            <ChevronRight className={expanded ? 'is-open' : ''} size={15} />
+                            <time>{formatRunDate(run.finished_at || run.started_at)}</time>
+                            <strong>{run.status}</strong>
+                            <span className="wf-llm-run-duration">{formatExecutionDuration(run.duration_ms)}</span>
+                            <span className="wf-llm-run-result">{runResultSummary(run)}</span>
+                        </button>
+                        {expanded && (
+                            <div className="wf-llm-run-detail">
+                                <div className="wf-llm-run-meta">
+                                    <span>{run.provider_name || '未知供应商'} / {run.model_name || '未知模型'}</span>
+                                    {run.http_status && <span>HTTP {run.http_status}</span>}
+                                    {run.request_id && <code>{run.request_id}</code>}
+                                </div>
+                                <section className={run.status === 'FAILED' ? 'is-error' : ''}><strong>{run.status === 'FAILED' ? '原始错误' : '原始响应'}</strong><pre>{rawContent}</pre></section>
+                            </div>
+                        )}
+                    </article>
+                );
+            })}
+        </div>
+    );
+}
+
 function Inspector({
     node,
     providers,
     providerLoadState,
     providerLoadError,
     onRefreshProviders,
+    onLoadVariables,
     initialTab = 'settings',
     onChange,
     onRun,
@@ -530,6 +672,13 @@ function Inspector({
     const [bodyMessage, setBodyMessage] = useState('');
     const [modelParametersText, setModelParametersText] = useState('{}');
     const [modelParametersError, setModelParametersError] = useState('');
+    const [advancedOpen, setAdvancedOpen] = useState(false);
+    const [variablesOpen, setVariablesOpen] = useState(false);
+    const [variableGroups, setVariableGroups] = useState([]);
+    const [variableLoadState, setVariableLoadState] = useState('idle');
+    const [variableLoadError, setVariableLoadError] = useState('');
+    const [editorScale, setEditorScale] = useState(1);
+    const editorBaseSizeRef = useRef(null);
     useEffect(() => {
         setCurlPanelOpen(false);
         setCurlText('');
@@ -538,21 +687,34 @@ function Inspector({
         setParamsOpen(true);
         setBodyMessage('');
         setSelectedParameterIndex(null);
-        setModelParametersText(JSON.stringify(node?.data.modelParameters || {}, null, 2));
+        const editableParameters = {...(node?.data.modelParameters || {})};
+        delete editableParameters.stream;
+        setModelParametersText(JSON.stringify(editableParameters, null, 2));
         setModelParametersError('');
+        setAdvancedOpen(false);
+        setVariablesOpen(false);
+        setVariableGroups([]);
+        setVariableLoadState('idle');
+        setVariableLoadError('');
+        editorBaseSizeRef.current = null;
+        setEditorScale(1);
     }, [node?.id]);
     if (!node) return null;
     const meta = NODE_TYPES[node.data.nodeType] || NODE_TYPES.SCRIPT;
     const Icon = meta.icon;
     const isHttp = node.data.nodeType === 'HTTP';
     const isLlm = node.data.nodeType === 'LLM';
+    const streamEnabled = isLlm && node.data.modelParameters?.stream === true;
+    const showOutputVariables = !isLlm || !streamEnabled;
     const modelReference = modelReferenceStatus(
         providers,
         node.data.providerId || '',
         node.data.modelName || '',
     );
     const llmConfigurationValid = !isLlm || (
-        modelReference.state === 'valid' && !modelParametersError
+        modelReference.state === 'valid'
+        && !modelParametersError
+        && Boolean(String(node.data.userPrompt || '').trim())
     );
     const httpConfig = {...defaultHttpConfig(), ...(node.data.httpConfig || {})};
     const width = Math.min(Math.round(760 * 1.4), window.innerWidth - 56);
@@ -569,6 +731,16 @@ function Inspector({
     const selectedParameter = selectedParameterIndex === null
         ? null
         : parameterRecords[selectedParameterIndex] || null;
+    const updateEditorScale = (_event, _direction, ref) => {
+        if (!editorBaseSizeRef.current) {
+            editorBaseSizeRef.current = {width: ref.offsetWidth, height: ref.offsetHeight};
+        }
+        const base = editorBaseSizeRef.current;
+        const widthScale = ref.offsetWidth / base.width;
+        const heightScale = ref.offsetHeight / base.height;
+        const nextScale = Math.max(0.75, Math.min(1.35, Math.min(widthScale, heightScale)));
+        setEditorScale(Number(nextScale.toFixed(3)));
+    };
     const resizeHandleClasses = {
         top: 'wf-resize-handle wf-resize-top',
         right: 'wf-resize-handle wf-resize-right',
@@ -596,10 +768,40 @@ function Inspector({
         try {
             const parsed = JSON.parse(text);
             if (!isPlainObject(parsed)) throw new Error('高级参数必须是 JSON 对象');
+            delete parsed.stream;
+            if (streamEnabled) parsed.stream = true;
             setModelParametersError('');
             onChange({modelParameters: parsed});
         } catch (error) {
             setModelParametersError(error instanceof SyntaxError ? '高级参数不是合法 JSON' : error.message);
+        }
+    };
+    const setStreamMode = (enabled) => {
+        const next = {...(node.data.modelParameters || {})};
+        if (enabled) next.stream = true;
+        else delete next.stream;
+        const editableParameters = {...next};
+        delete editableParameters.stream;
+        setModelParametersText(JSON.stringify(editableParameters, null, 2));
+        setModelParametersError('');
+        onChange({modelParameters: next});
+    };
+    const toggleVariables = async () => {
+        if (variablesOpen) {
+            setVariablesOpen(false);
+            return;
+        }
+        setVariablesOpen(true);
+        setVariableLoadState('loading');
+        setVariableLoadError('');
+        try {
+            const groups = await onLoadVariables();
+            setVariableGroups(Array.isArray(groups) ? groups : []);
+            setVariableLoadState('ready');
+        } catch (error) {
+            setVariableGroups([]);
+            setVariableLoadState('error');
+            setVariableLoadError(error instanceof Error ? error.message : '变量加载失败');
         }
     };
     const updateOutputVariable = (id, patch) => onChange({
@@ -673,6 +875,15 @@ function Inspector({
             ))}
         </div>
     );
+    const copyVariableValue = async (variable) => {
+        if (!variable.available) return;
+        try {
+            await copyTextToClipboard(parameterDataText(variable.value, true));
+            if (window.showToast) window.showToast(`已复制变量 ${variable.name}`, 'success');
+        } catch (error) {
+            if (window.showToast) window.showToast(error instanceof Error ? error.message : '复制失败', 'error');
+        }
+    };
     return (
         <Rnd
             className="wf-node-editor-rnd"
@@ -685,21 +896,53 @@ function Inspector({
             dragHandleClassName="wf-node-editor-drag-handle"
             cancel="button,input,textarea,.wf-inspector-tabs,.wf-inspector-body"
             resizeHandleClasses={resizeHandleClasses}
+            onResize={updateEditorScale}
+            onResizeStop={updateEditorScale}
         >
-            <aside className="wf-inspector" aria-label="节点配置">
+            <div
+                className="wf-inspector-scale-shell"
+                style={{
+                    width: `${100 / editorScale}%`,
+                    height: `${100 / editorScale}%`,
+                    transform: `scale(${editorScale})`,
+                }}
+            >
+              <aside className="wf-inspector" aria-label="节点配置">
                 <header className="wf-node-editor-drag-handle">
                     <span className="wf-inspector-icon" style={{'--node-accent': meta.color}}><Icon size={18} /></span>
                     <div className="wf-inspector-title"><strong>{node.data.label}</strong><small>{meta.caption}</small></div>
                     <div className="wf-inspector-actions">
-                        <button type="button" disabled={!llmConfigurationValid} onClick={onRun} title={llmConfigurationValid ? '运行' : '请先选择有效模型并修正高级参数'} aria-label="运行当前节点"><Play size={15} /></button>
-                        <button type="button" disabled={!llmConfigurationValid} className={node.data.savedAt && !node.data.isDirty ? 'is-saved' : ''} onClick={onSave} title={llmConfigurationValid ? (node.data.savedAt && !node.data.isDirty ? `已保存 ${node.data.savedAt}` : '保存') : '请先选择有效模型并修正高级参数'} aria-label="保存当前节点"><Save size={15} /></button>
+                        <button type="button" className={variablesOpen ? 'is-active' : ''} onClick={toggleVariables} title="变量" aria-label="查看节点变量"><Variable size={15} /></button>
+                        <button type="button" disabled={!llmConfigurationValid} onClick={onRun} title={llmConfigurationValid ? '运行' : '请选择有效模型、填写用户提示词并修正高级参数'} aria-label="运行当前节点"><Play size={15} /></button>
+                        <button type="button" disabled={!llmConfigurationValid} className={node.data.savedAt && !node.data.isDirty ? 'is-saved' : ''} onClick={onSave} title={llmConfigurationValid ? (node.data.savedAt && !node.data.isDirty ? `已保存 ${node.data.savedAt}` : '保存') : '请选择有效模型、填写用户提示词并修正高级参数'} aria-label="保存当前节点"><Save size={15} /></button>
                         <button type="button" onClick={onClose} title="关闭" aria-label="关闭"><X size={17} /></button>
                     </div>
                 </header>
+                {variablesOpen && (
+                    <aside className="wf-node-variable-panel" aria-label="节点可用变量">
+                        <header><strong>可用变量</strong><button type="button" onClick={() => setVariablesOpen(false)} title="关闭变量" aria-label="关闭变量"><X size={15} /></button></header>
+                        {variableLoadState === 'loading' && <div className="wf-node-variable-empty"><LoaderCircle className="is-spinning" size={15} />正在加载</div>}
+                        {variableLoadState === 'error' && <div className="wf-node-variable-empty is-error">{variableLoadError}</div>}
+                        {variableLoadState === 'ready' && variableGroups.map((group) => (
+                            <section key={group.id}>
+                                <strong>{group.label}</strong>
+                                <div className="wf-node-variable-heading"><span>变量名</span><span>变量值</span><span /></div>
+                                {(group.variables || []).map((variable) => (
+                                    <div className="wf-node-variable-row" key={`${group.id}-${variable.name}`}>
+                                        <code>{variable.name}</code>
+                                        <span className={!variable.available ? 'is-empty' : ''}>{variable.available ? parameterDataText(variable.value) : '尚无值'}</span>
+                                        <button type="button" disabled={!variable.available} onClick={() => copyVariableValue(variable)} title={variable.available ? `复制 ${variable.name} 的值` : '尚无值'} aria-label={`复制变量值 ${variable.name}`}><Copy size={13} /></button>
+                                    </div>
+                                ))}
+                                {!(group.variables || []).length && <div className="wf-node-variable-group-empty">无变量</div>}
+                            </section>
+                        ))}
+                    </aside>
+                )}
                 <div className="wf-inspector-tabs">
                     <button type="button" className={tab === 'settings' ? 'is-active' : ''} onClick={() => setTab('settings')}>设置</button>
-                    {meta.executable && <button type="button" className={tab === 'code' ? 'is-active' : ''} onClick={() => setTab('code')}>代码</button>}
-                    <button type="button" className={tab === 'parameters' ? 'is-active' : ''} onClick={() => setTab('parameters')}>参数</button>
+                    {meta.executable && !isLlm && <button type="button" className={tab === 'code' ? 'is-active' : ''} onClick={() => setTab('code')}>代码</button>}
+                    {!isLlm && <button type="button" className={tab === 'parameters' ? 'is-active' : ''} onClick={() => setTab('parameters')}>参数</button>}
                     <button type="button" className={tab === 'logs' ? 'is-active' : ''} onClick={() => setTab('logs')}>日志</button>
                 </div>
                 {tab === 'settings' ? (
@@ -722,11 +965,26 @@ function Inspector({
                                             onSelect={(providerId, modelName) => onChange({providerId, modelName})}
                                         />
                                     </label>
-                                    <label className="wf-llm-parameters-field">
-                                        <span>高级参数</span>
-                                        <textarea aria-label="模型高级参数 JSON" spellCheck="false" value={modelParametersText} onChange={(event) => updateModelParameters(event.target.value)} />
+                                    <div className="wf-llm-stream-field">
+                                        <span>流式输出</span>
+                                        <label className="wf-llm-stream-switch">
+                                            <input type="checkbox" role="switch" aria-label="流式输出" checked={streamEnabled} onChange={(event) => setStreamMode(event.target.checked)} />
+                                            <i aria-hidden="true"><span /></i>
+                                        </label>
+                                    </div>
+                                    <label className="wf-llm-prompt-field">
+                                        <span>系统提示词</span>
+                                        <textarea aria-label="系统提示词" value={node.data.systemPrompt || ''} onChange={(event) => onChange({systemPrompt: event.target.value})} />
                                     </label>
-                                    {modelParametersError && <span className="wf-model-parameters-error" role="alert">{modelParametersError}</span>}
+                                    <label className="wf-llm-prompt-field is-user">
+                                        <span>用户提示词</span>
+                                        <textarea aria-label="用户提示词" value={node.data.userPrompt || ''} onChange={(event) => onChange({userPrompt: event.target.value})} />
+                                    </label>
+                                    <div className="wf-llm-advanced">
+                                        <button type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((open) => !open)}><span>高级参数</span><ChevronRight className={advancedOpen ? 'is-open' : ''} size={15} /></button>
+                                        {(advancedOpen || modelParametersError) && <textarea aria-label="模型高级参数 JSON" spellCheck="false" value={modelParametersText} onChange={(event) => updateModelParameters(event.target.value)} />}
+                                        {modelParametersError && <span className="wf-model-parameters-error" role="alert">{modelParametersError}</span>}
+                                    </div>
                                 </section>
                             )}
                             {isHttp && (
@@ -797,21 +1055,26 @@ function Inspector({
                                         <label><span>重复执行</span><input type="number" min="1" value={node.data.repeatExecution ?? 1} onChange={(event) => onChange({repeatExecution: Number(event.target.value)})} /></label>
                                     </div>
                                 )}
-                                <button type="button" aria-expanded={mappingOpen} onClick={() => setMappingOpen((open) => !open)}><span>输出变量</span><ChevronRight className={mappingOpen ? 'is-open' : ''} size={15} /></button>
-                                {mappingOpen && (
-                                    <div className="wf-config-panel wf-output-variable-list">
-                                        {outputVariables.map((row, index) => (
-                                            <div className="wf-output-variable-row" key={row.id}>
-                                                <label><span>变量名</span><input aria-label={`输出变量名 ${index + 1}`} value={row.name} onChange={(event) => updateOutputVariable(row.id, {name: event.target.value})} /></label>
-                                                <label><span>变量</span><input aria-label={`输出变量 ${index + 1}`} value={row.value} onChange={(event) => updateOutputVariable(row.id, {value: event.target.value})} /></label>
-                                                {index === 0 ? (
-                                                    <button type="button" className="wf-inline-icon-button" onClick={addOutputVariable} title="添加输出变量" aria-label="添加输出变量"><Plus size={15} /></button>
-                                                ) : (
-                                                    <button type="button" className="wf-inline-icon-button is-danger" onClick={() => removeOutputVariable(row.id)} title="删除输出变量" aria-label={`删除输出变量 ${index + 1}`}><Trash2 size={15} /></button>
-                                                )}
+                                {showOutputVariables && (
+                                    <>
+                                        <button type="button" aria-expanded={mappingOpen} onClick={() => setMappingOpen((open) => !open)}><span>输出变量</span><ChevronRight className={mappingOpen ? 'is-open' : ''} size={15} /></button>
+                                        {mappingOpen && (
+                                            <div className="wf-config-panel wf-output-variable-list">
+                                                {outputVariables.map((row, index) => (
+                                                    <div className="wf-output-variable-row" key={row.id}>
+                                                        <label><span>变量名</span><input aria-label={`输出变量名 ${index + 1}`} value={row.name} onChange={(event) => updateOutputVariable(row.id, {name: event.target.value})} /></label>
+                                                        <label><span>类型</span><select aria-label={`输出变量类型 ${index + 1}`} value={row.type || 'AUTO'} onChange={(event) => updateOutputVariable(row.id, {type: event.target.value})}>{OUTPUT_VARIABLE_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}</select></label>
+                                                        <label><span>提取表达式</span><input aria-label={`输出变量 ${index + 1}`} value={row.value} onChange={(event) => updateOutputVariable(row.id, {value: event.target.value})} /></label>
+                                                        {index === 0 ? (
+                                                            <button type="button" className="wf-inline-icon-button" onClick={addOutputVariable} title="添加输出变量" aria-label="添加输出变量"><Plus size={15} /></button>
+                                                        ) : (
+                                                            <button type="button" className="wf-inline-icon-button is-danger" onClick={() => removeOutputVariable(row.id)} title="删除输出变量" aria-label={`删除输出变量 ${index + 1}`}><Trash2 size={15} /></button>
+                                                        )}
+                                                    </div>
+                                                ))}
                                             </div>
-                                        ))}
-                                    </div>
+                                        )}
+                                    </>
                                 )}
                             </section>
                         </div>
@@ -858,18 +1121,21 @@ function Inspector({
                     </div>
                 ) : (
                     <div className="wf-inspector-body wf-node-log-panel">
-                        {(node.data.runHistory || []).length ? node.data.runHistory.map((entry) => (
-                            <div key={entry.id}><time>{entry.time}</time><strong>{entry.status}</strong><span>{entry.message}</span></div>
+                        {isLlm ? (
+                            <LlmRunHistory runs={node.data.runHistory || []} />
+                        ) : (node.data.runHistory || []).length ? node.data.runHistory.map((entry) => (
+                            <div className="wf-legacy-run" key={entry.id}><time>{entry.time}</time><strong>{entry.status}</strong><span>{entry.message}</span></div>
                         )) : <div className="wf-node-log-empty">暂无日志</div>}
                     </div>
                 )}
-            </aside>
+              </aside>
+            </div>
         </Rnd>
     );
 }
 
 function WorkflowStudio({options}) {
-    const graph = useMemo(initialGraph, []);
+    const graph = useMemo(() => graphFromDraft(options.draft), [options.draft]);
     const [nodes, setNodes, onNodesChange] = useNodesState(graph.nodes);
     const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
     const [selectedNodeIds, setSelectedNodeIds] = useState([]);
@@ -879,10 +1145,13 @@ function WorkflowStudio({options}) {
     const [clipboard, setClipboard] = useState(null);
     const [headerPanel, setHeaderPanel] = useState(null);
     const [marquee, setMarquee] = useState(null);
-    const [globalVariables, setGlobalVariables] = useState([emptyMappingRow()]);
+    const [globalVariables, setGlobalVariables] = useState(() => options.draft?.global_variables?.length
+        ? cloneValue(options.draft.global_variables)
+        : [emptyMappingRow()]);
     const [nodeSaveNotice, setNodeSaveNotice] = useState(null);
     const [workflowName, setWorkflowName] = useState(options.name || '未命名工作流');
-    const [saveState, setSaveState] = useState('本地草稿');
+    const [workflowId, setWorkflowId] = useState(options.id || null);
+    const [saveState, setSaveState] = useState(options.id ? '已保存' : '未保存');
     const [modelProviders, setModelProviders] = useState([]);
     const [providerLoadState, setProviderLoadState] = useState('loading');
     const [providerLoadError, setProviderLoadError] = useState('');
@@ -921,6 +1190,33 @@ function WorkflowStudio({options}) {
     useEffect(() => {
         loadModelProviders();
     }, [loadModelProviders]);
+
+    const persistDraft = useCallback(async () => {
+        if (!options.onPersist) throw new Error('Workflow 持久化入口不可用');
+        const name = workflowName.trim();
+        if (!name) throw new Error('Workflow 名称不能为空');
+        setSaveState('正在保存');
+        try {
+            const saved = await options.onPersist({
+                id: workflowId,
+                name,
+                description: options.draft?.description || '',
+                nodes: nodes.map(serializableNode),
+                edges: edges.map(serializableEdge),
+                global_variables: cloneValue(globalVariables),
+            });
+            setWorkflowId(saved.id);
+            setSaveState('已保存');
+            setNodes((current) => current.map((node) => ({
+                ...node,
+                data: {...node.data, isDirty: false},
+            })));
+            return saved.id;
+        } catch (error) {
+            setSaveState('保存失败');
+            throw error;
+        }
+    }, [edges, globalVariables, nodes, options, setNodes, workflowId, workflowName]);
 
     const closeMenus = useCallback(() => {
         setContextMenu(null);
@@ -964,30 +1260,189 @@ function WorkflowStudio({options}) {
         return next;
     }, [closeMenus, recordHistory, setNodes]);
 
-    const runNode = useCallback((id) => {
+    const loadNodeRuns = useCallback(async (id, activeWorkflowId = workflowId) => {
+        if (!activeWorkflowId) return [];
+        try {
+            const response = await fetch(`/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}/runs`, {
+                headers: {accept: 'application/json'},
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+            const runs = Array.isArray(payload.runs) ? payload.runs.slice(0, 10) : [];
+            setNodes((current) => current.map((node) => node.id === id ? {
+                ...node,
+                data: {
+                    ...node.data,
+                    runHistory: runs,
+                    status: runs[0]?.status || 'PENDING',
+                    executionDurationMs: runs[0]?.duration_ms || 0,
+                },
+            } : node));
+            return runs;
+        } catch (error) {
+            if (window.showToast) window.showToast(error instanceof Error ? error.message : '节点日志加载失败', 'error');
+            return [];
+        }
+    }, [setNodes, workflowId]);
+
+    const loadNodeVariables = useCallback(async (id) => {
+        const activeWorkflowId = await persistDraft();
+        const response = await fetch(`/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}/variables`, {
+            headers: {accept: 'application/json'},
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+        return payload.groups || [];
+    }, [persistDraft]);
+
+    useEffect(() => {
+        const targetNode = nodes.find((node) => node.id === editorNodeId);
+        if (targetNode?.data.nodeType === 'LLM' && workflowId) {
+            loadNodeRuns(targetNode.id);
+        }
+    }, [editorNodeId, loadNodeRuns, workflowId]);
+
+    const runNode = useCallback(async (id) => {
         const startedAt = new Date().toLocaleTimeString('zh-CN', {hour12: false});
         const startedAtMs = Date.now();
         const executionId = rowId();
         const targetNode = nodes.find((node) => node.id === id);
         if (targetNode?.data.nodeType === 'LLM') {
-            const reference = modelReferenceStatus(
-                modelProviders,
-                targetNode.data.providerId || '',
-                targetNode.data.modelName || '',
-            );
-            if (reference.state !== 'valid') {
-                const message = reference.state === 'empty' ? '未选择模型' : '模型已失效';
+            const streaming = targetNode.data.modelParameters?.stream === true;
+            let activeWorkflowId;
+            try {
+                activeWorkflowId = await persistDraft();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Workflow 保存失败';
                 setNodes((current) => current.map((node) => node.id === id ? {
                     ...node,
                     data: {
                         ...node.data,
                         status: 'FAILED',
                         executionDurationMs: 0,
-                        runHistory: (node.data.runHistory || []).concat({id: rowId(), time: startedAt, status: 'FAILED', message}),
                     },
                 } : node));
+                if (window.showToast) window.showToast(message, 'error');
                 return;
             }
+            setNodes((current) => current.map((node) => node.id === id ? {
+                ...node,
+                data: {
+                    ...node.data,
+                    status: 'RUNNING',
+                    executionId,
+                    executionDurationMs: 0,
+                    runHistory: [{
+                        id: executionId,
+                        status: 'RUNNING',
+                        started_at: new Date().toISOString(),
+                        duration_ms: 0,
+                        provider_name: '',
+                        model_name: targetNode.data.modelName || '',
+                        response_body: '',
+                    }].concat(node.data.runHistory || []).slice(0, 10),
+                },
+            } : node));
+            const elapsedTimer = window.setInterval(() => {
+                const executionDurationMs = Date.now() - startedAtMs;
+                setNodes((current) => current.map((node) => node.id === id && node.data.executionId === executionId ? {
+                    ...node,
+                    data: {...node.data, executionDurationMs},
+                } : node));
+            }, 100);
+            timers.current.push(elapsedTimer);
+            try {
+                const suffix = streaming ? '/runs/stream' : '/runs';
+                const response = await fetch(`/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}${suffix}`, {
+                    method: 'POST',
+                    headers: {accept: streaming ? 'text/event-stream' : 'application/json'},
+                });
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    throw new Error(payload.detail || `HTTP ${response.status}`);
+                }
+                let run;
+                if (streaming) {
+                    if (!response.body) throw new Error('流式响应没有内容');
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    const consumeBlock = (block) => {
+                        let eventName = '';
+                        let dataText = '';
+                        block.split('\n').forEach((line) => {
+                            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                            if (line.startsWith('data:')) dataText += line.slice(5).trim();
+                        });
+                        if (!dataText) return;
+                        const payload = JSON.parse(dataText);
+                        if (eventName === 'raw') {
+                            const chunk = String(payload.chunk || '');
+                            setNodes((current) => current.map((node) => node.id === id ? {
+                                ...node,
+                                data: {
+                                    ...node.data,
+                                    runHistory: (node.data.runHistory || []).map((item) => item.id === executionId ? {
+                                        ...item,
+                                        response_body: `${item.response_body || ''}${chunk}`,
+                                        duration_ms: Date.now() - startedAtMs,
+                                    } : item),
+                                },
+                            } : node));
+                        }
+                        if (eventName === 'run') run = payload;
+                    };
+                    while (true) {
+                        const {done, value} = await reader.read();
+                        buffer += decoder.decode(value || new Uint8Array(), {stream: !done}).replace(/\r\n/g, '\n');
+                        let separator = buffer.indexOf('\n\n');
+                        while (separator >= 0) {
+                            consumeBlock(buffer.slice(0, separator));
+                            buffer = buffer.slice(separator + 2);
+                            separator = buffer.indexOf('\n\n');
+                        }
+                        if (done) break;
+                    }
+                    if (buffer.trim()) consumeBlock(buffer.trim());
+                    if (!run) throw new Error('流式运行缺少最终结果');
+                } else {
+                    const payload = await response.json();
+                    run = payload.run;
+                }
+                window.clearInterval(elapsedTimer);
+                setNodes((current) => current.map((node) => node.id === id ? {
+                    ...node,
+                    data: {
+                        ...node.data,
+                        status: run.status,
+                        executionId: null,
+                        executionDurationMs: run.duration_ms || 0,
+                        runHistory: [run].concat((node.data.runHistory || []).filter((item) => item.id !== run.id && item.id !== executionId)).slice(0, 10),
+                    },
+                } : node));
+                if (window.showToast) window.showToast(run.status === 'PASSED' ? '节点运行完成' : run.error?.message || '节点运行失败', run.status === 'PASSED' ? 'success' : 'error');
+            } catch (error) {
+                window.clearInterval(elapsedTimer);
+                const message = error instanceof Error ? error.message : '节点运行失败';
+                setNodes((current) => current.map((node) => node.id === id ? {
+                    ...node,
+                    data: {
+                        ...node.data,
+                        status: 'FAILED',
+                        executionId: null,
+                        executionDurationMs: Date.now() - startedAtMs,
+                        runHistory: (node.data.runHistory || []).map((item) => item.id === executionId ? {
+                            ...item,
+                            status: 'FAILED',
+                            finished_at: new Date().toISOString(),
+                            duration_ms: Date.now() - startedAtMs,
+                            error: {message, traceback: message},
+                        } : item),
+                    },
+                } : node));
+                if (window.showToast) window.showToast(message, 'error');
+            }
+            return;
         }
         setNodes((current) => current.map((node) => node.id === id ? {
             ...node,
@@ -1022,12 +1477,18 @@ function WorkflowStudio({options}) {
             } : node));
         }, 900);
         timers.current.push(elapsedTimer, timer);
-    }, [modelProviders, nodes, setNodes]);
+    }, [nodes, persistDraft, setNodes]);
 
-    const saveNode = useCallback((id) => {
+    const saveNode = useCallback(async (id) => {
         const savedAt = new Date().toLocaleTimeString('zh-CN', {hour12: false});
         const node = nodes.find((item) => item.id === id);
         if (!node) return;
+        try {
+            await persistDraft();
+        } catch (error) {
+            if (window.showToast) window.showToast(error instanceof Error ? error.message : '节点保存失败', 'error');
+            return;
+        }
         const noticeId = rowId();
         setNodes((current) => current.map((item) => item.id === id ? {
             ...item,
@@ -1038,7 +1499,7 @@ function WorkflowStudio({options}) {
             setNodeSaveNotice((current) => current?.id === noticeId ? null : current);
         }, 2400);
         timers.current.push(timer);
-    }, [nodes, setNodes]);
+    }, [nodes, persistDraft, setNodes]);
 
     const runAll = useCallback(() => {
         closeMenus();
@@ -1296,17 +1757,20 @@ function WorkflowStudio({options}) {
     useEffect(() => {
         if (initialLayoutDone.current) return;
         initialLayoutDone.current = true;
-        setNodes((current) => layoutGraph(current, edges));
+        if (!options.draft?.nodes?.length) {
+            setNodes((current) => layoutGraph(current, edges));
+        }
         window.setTimeout(() => fitView({padding: 0.16, duration: 0}), 0);
-    }, [edges, fitView, setNodes]);
+    }, [edges, fitView, options.draft, setNodes]);
 
-    const save = useCallback(() => {
-        setSaveState('正在保存');
-        window.setTimeout(() => {
-            setSaveState('已保存');
-            if (options.onSave) options.onSave({name: workflowName});
-        }, 480);
-    }, [options, workflowName]);
+    const save = useCallback(async () => {
+        try {
+            await persistDraft();
+            if (window.showToast) window.showToast('Workflow 草稿已保存', 'success');
+        } catch (error) {
+            if (window.showToast) window.showToast(error instanceof Error ? error.message : 'Workflow 保存失败', 'error');
+        }
+    }, [persistDraft]);
 
     const close = useCallback(() => {
         timers.current.forEach((timer) => {
@@ -1448,6 +1912,7 @@ function WorkflowStudio({options}) {
                     providerLoadState={providerLoadState}
                     providerLoadError={providerLoadError}
                     onRefreshProviders={loadModelProviders}
+                    onLoadVariables={() => editorNodeId ? loadNodeVariables(editorNodeId) : []}
                     onRun={() => editorNodeId && runNode(editorNodeId)}
                     onSave={() => editorNodeId && saveNode(editorNodeId)}
                     onClose={() => setEditorNodeId(null)}

@@ -8,6 +8,7 @@ from execution import (
     chat_completions_url,
     deep_merge_model_request,
     invoke_openai_compatible,
+    parse_openai_compatible_response,
 )
 
 
@@ -125,4 +126,23 @@ def test_openai_compatible_transport_forwards_body_without_parameter_translation
             "enable_thinking": True,
             "vendor_extension": {"level": "high"},
         },
+    }
+
+
+def test_parse_streaming_response_combines_output_and_usage():
+    response = httpx.Response(
+        200,
+        text=(
+            'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}],'
+            '"usage":{"total_tokens":12}}\n\n'
+            "data: [DONE]\n\n"
+        ),
+    )
+
+    assert parse_openai_compatible_response(response, stream=True) == {
+        "output": "hello world",
+        "usage": {"total_tokens": 12},
+        "finish_reason": "stop",
     }

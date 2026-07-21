@@ -1,4 +1,4 @@
-/* Target management and the frontend-local Workflow Studio. */
+/* Target management and the persistent Workflow Studio. */
 var executionState = {
     targets: [],
     workflows: [],
@@ -245,7 +245,7 @@ function renderWorkflowTable() {
         return '<tr><td><button class="execution-name-button" type="button" data-workflow-edit="' + esc(workflow.id) + '">' + esc(workflow.name) + '</button>' +
             '<div class="execution-id">' + esc(workflow.id) + '</div></td>' +
             '<td>' + esc(workflow.description || '—') + '</td>' +
-            '<td><span class="execution-badge workflow-invalid">前端草稿</span></td>' +
+            '<td><span class="execution-badge workflow-valid">已持久化</span></td>' +
             '<td>' + esc(formatDateTime(workflow.updated_at)) + '</td>' +
             '<td><button class="btn-icon" type="button" data-workflow-edit="' + esc(workflow.id) + '" title="编辑 Workflow">' + icon('edit') + '</button></td></tr>';
     }).join('');
@@ -255,8 +255,13 @@ function renderWorkflowTable() {
 }
 
 async function loadWorkflows() {
-    // T13.2 uses frontend-local Studio state until the new DAG protocol is frozen.
-    renderWorkflowTable();
+    try {
+        var data = await API.get('/api/workflow-drafts');
+        executionState.workflows = data.workflows || [];
+        renderWorkflowTable();
+    } catch (error) {
+        showToast(executionErrorMessage(error), 'error');
+    }
 }
 
 function viewWorkflows() {
@@ -267,7 +272,7 @@ function viewWorkflows() {
                 '<button class="btn btn-sm btn-primary" id="btn-workflow-add" type="button">' + icon('add') + '新增工作流</button>' +
                 '<button class="btn btn-sm" id="btn-workflow-refresh" type="button">' + icon('refresh') + '刷新</button>' +
                 '<input type="search" class="input toolbar-search" id="workflow-search" placeholder="按名称搜索..." aria-label="搜索工作流" />' +
-                '<select class="input toolbar-control" id="workflow-status-filter" aria-label="筛选工作流状态" disabled><option>前端草稿</option></select>' +
+                '<select class="input toolbar-control" id="workflow-status-filter" aria-label="筛选工作流状态" disabled><option>已持久化</option></select>' +
                 '<span class="toolbar-sep"></span><span class="execution-count workflow-list-count" id="workflow-count">0 个 Workflow</span>' +
             '</div>' +
             '<div class="table-wrap" id="workflows-table-wrap"><table class="table workflow-table" id="workflows-table">' +
@@ -287,23 +292,37 @@ async function openWorkflowEditor(workflowId) {
         showToast('工作流画布资源加载失败', 'error');
         return;
     }
-    var workflow = workflowId
-        ? executionState.workflows.find(function (item) { return item.id === workflowId; })
-        : null;
+    var workflow = null;
+    if (workflowId) {
+        try {
+            workflow = (await API.get('/api/workflow-drafts/' + encodeURIComponent(workflowId))).workflow;
+        } catch (error) {
+            showToast(executionErrorMessage(error), 'error');
+            return;
+        }
+    }
     window.AgentBenchWorkflowCanvas.mount({
         id: workflowId || null,
         name: workflow ? workflow.name : '未命名工作流',
-        onSave: function () {
-            if (!workflow) {
-                workflow = {
-                    id: 'local-' + Date.now(), name: '未命名工作流', description: '',
-                    updated_at: new Date().toISOString(),
-                };
-                executionState.workflows.unshift(workflow);
-            } else {
-                workflow.updated_at = new Date().toISOString();
-            }
-            showToast('画布草稿已保存到当前前端会话', 'success');
+        draft: workflow,
+        onPersist: async function (draft) {
+            var body = {
+                name: draft.name,
+                description: draft.description || '',
+                nodes: draft.nodes || [],
+                edges: draft.edges || [],
+                global_variables: draft.global_variables || [],
+            };
+            var data = draft.id
+                ? await API.put('/api/workflow-drafts/' + encodeURIComponent(draft.id), body)
+                : await API.post('/api/workflow-drafts', body);
+            workflow = data.workflow;
+            var existingIndex = executionState.workflows.findIndex(function (item) {
+                return item.id === workflow.id;
+            });
+            if (existingIndex >= 0) executionState.workflows[existingIndex] = workflow;
+            else executionState.workflows.unshift(workflow);
+            return workflow;
         },
         onClose: function () {
             window.setTimeout(function () {
@@ -312,8 +331,4 @@ async function openWorkflowEditor(workflowId) {
             }, 0);
         },
     });
-}
-
-async function saveWorkflowDraft() {
-    showToast('新版 DAG 持久化协议尚未建立，当前只保存前端会话', 'success');
 }
