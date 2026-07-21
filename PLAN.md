@@ -1211,6 +1211,7 @@ T13.2.1-T13.2.6 已完成
 - 13.2 已完成：HTTP 使用真实请求配置进入 Worker，AGENT/SCRIPT 使用真实 `main.py` 子进程；四类节点统一按 `request / response` 提取输出变量。成功/失败均保存原始 stdout、stderr、response 和 traceback，HTTP 非 2xx 保留原始响应。专项 `uv run pytest tests/test_workflow_node_runs.py -q` 为 `5 passed, 1 warning`，与既有 LLM/Worker/草稿专项合计 `24 passed, 1 warning`。
 - 13.3 已完成：四类节点共用可展开运行历史，摘要显示日期、状态、耗时和最终结果；详情按原始请求、stdout、response、stderr、traceback 分区展示，空区不伪造内容，保留原始文本。运行入口与日志加载扩展到 HTTP/AGENT/LLM/SCRIPT。`npm run build`、`node --check web/static/assets/workflow-canvas.js` 和 `uv run pytest tests/test_execution_frontend.py -q`（`8 passed, 1 warning`）通过；节点执行专项现为 `6 passed, 1 warning`。
 - 13.4 已完成：浏览器真实 Script 成功运行以 `212ms` 进入 `PASSED`，展开日志显示原始 request/stdout/response/stderr，并提取 `browser_value=浏览器回归`；失败运行以 `222ms` 进入 `FAILED`，保留执行前 stdout、用户 stderr、Worker traceback 和路由 traceback。全量回归 `177 passed, 6 skipped, 1 warning in 16.92s`，构建、Python/JS 静态检查和 `git diff --check` 通过；临时 Workflow 删除后 GET 为 `404`。
+- 13.5 发布完成：提交 `7f15ac9`（`Add real workflow node execution logs`）已推送到 `origin/codex/tool-template-refactor`。
 
 #### Step 14：Workflow 与节点中断控制（pending clarification，2026-07-22）
 
