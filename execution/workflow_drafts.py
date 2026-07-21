@@ -80,9 +80,70 @@ class WorkflowDraftRecord(WorkflowDraftConfiguration):
 
 
 class WorkflowNodeRunStatus(str, Enum):
+    PENDING = "PENDING"
     RUNNING = "RUNNING"
-    PASSED = "PASSED"
+    SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"
+
+
+def validate_complete_workflow_graph(
+    nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> None:
+    """Require every business node to sit on a START-to-END path.
+
+    This is intentionally separate from the Pydantic draft model so existing
+    drafts can still be opened. Callers invoke it at save and execution time.
+    """
+    node_by_id = {node.get("id"): node for node in nodes}
+    starts = [
+        node for node in nodes
+        if isinstance(node.get("data"), dict)
+        and node["data"].get("nodeType") == "START"
+    ]
+    ends = [
+        node for node in nodes
+        if isinstance(node.get("data"), dict)
+        and node["data"].get("nodeType") == "END"
+    ]
+    if len(starts) != 1:
+        raise ValueError(f"Workflow 必须包含且只能包含一个 START 节点，当前 {len(starts)} 个")
+    if len(ends) != 1:
+        raise ValueError(f"Workflow 必须包含且只能包含一个 END 节点，当前 {len(ends)} 个")
+
+    adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
+    reverse: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
+    for edge in edges:
+        source, target = edge.get("source"), edge.get("target")
+        if source in adjacency and target in adjacency:
+            adjacency[source].add(target)
+            reverse[target].add(source)
+
+    def walk(graph: dict[str, set[str]], origin: str) -> set[str]:
+        visited = {origin}
+        pending = [origin]
+        while pending:
+            current = pending.pop()
+            for neighbor in graph[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    pending.append(neighbor)
+        return visited
+
+    start_id = starts[0]["id"]
+    end_id = ends[0]["id"]
+    reachable_from_start = walk(adjacency, start_id)
+    can_reach_end = walk(reverse, end_id)
+    orphaned = [
+        node for node in nodes
+        if node["id"] not in reachable_from_start or node["id"] not in can_reach_end
+    ]
+    if orphaned:
+        labels = [
+            str((node.get("data") or {}).get("label") or node["id"])
+            for node in orphaned
+        ]
+        raise ValueError(f"Workflow 存在游离节点: {', '.join(labels)}")
 
 
 class WorkflowNodeRunRecord(_WorkflowModel):
@@ -208,6 +269,10 @@ class WorkflowDraftRepository:
                         "ALTER TABLE workflow_node_runs "
                         "ADD COLUMN output_variables_json TEXT NOT NULL DEFAULT '{}'"
                     )
+                connection.execute(
+                    "UPDATE workflow_node_runs SET status = 'SUCCESS' "
+                    "WHERE status = 'PASSED'"
+                )
                 connection.commit()
             self._initialized = True
 
@@ -362,14 +427,14 @@ class WorkflowDraftRepository:
             ).fetchall()
         return [self._run_from_row(row) for row in rows]
 
-    def latest_passed_run(
+    def latest_success_run(
         self, workflow_id: str, node_id: str
     ) -> WorkflowNodeRunRecord | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM workflow_node_runs
-                WHERE workflow_id = ? AND node_id = ? AND status = 'PASSED'
+                WHERE workflow_id = ? AND node_id = ? AND status = 'SUCCESS'
                 ORDER BY started_at DESC, id DESC
                 LIMIT 1
                 """,

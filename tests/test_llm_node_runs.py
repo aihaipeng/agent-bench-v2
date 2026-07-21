@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
@@ -62,9 +65,15 @@ def _workflow_body(base_url: str, *, user_prompt="请评估：${question}", para
         "description": "",
         "nodes": [
             {
-                "id": "llm-1",
+                "id": "start",
                 "type": "workflowNode",
                 "position": {"x": 0, "y": 0},
+                "data": {"nodeType": "START", "label": "开始"},
+            },
+            {
+                "id": "llm-1",
+                "type": "workflowNode",
+                "position": {"x": 200, "y": 0},
                 "data": {
                     "nodeType": "LLM",
                     "providerId": "provider-1",
@@ -80,9 +89,18 @@ def _workflow_body(base_url: str, *, user_prompt="请评估：${question}", para
                         }
                     ],
                 },
-            }
+            },
+            {
+                "id": "end",
+                "type": "workflowNode",
+                "position": {"x": 400, "y": 0},
+                "data": {"nodeType": "END", "label": "完成"},
+            },
         ],
-        "edges": [],
+        "edges": [
+            {"id": "start-llm", "source": "start", "target": "llm-1"},
+            {"id": "llm-end", "source": "llm-1", "target": "end"},
+        ],
         "global_variables": [
             {"id": "variable-1", "name": "question", "value": "退款流程"}
         ],
@@ -123,7 +141,7 @@ def test_llm_node_real_http_run_persists_output_usage_and_safe_request(
         _create_provider(database_path, base_url)
         client = TestClient(app)
         body = _workflow_body(base_url)
-        body["nodes"][0]["data"]["outputVariables"].append(
+        body["nodes"][1]["data"]["outputVariables"].append(
             {
                 "id": "output-2",
                 "name": "sent_prompt",
@@ -131,7 +149,7 @@ def test_llm_node_real_http_run_persists_output_usage_and_safe_request(
                 "value": "request.messages[0].content",
             }
         )
-        body["nodes"][0]["data"]["outputVariables"].append(
+        body["nodes"][1]["data"]["outputVariables"].append(
             {
                 "id": "output-3",
                 "name": "token_count",
@@ -152,7 +170,7 @@ def test_llm_node_real_http_run_persists_output_usage_and_safe_request(
 
     assert response.status_code == 200
     run = response.json()["run"]
-    assert run["status"] == "PASSED"
+    assert run["status"] == "SUCCESS"
     assert run["output"] == "需要先核对订单状态"
     assert run["usage"]["total_tokens"] == 39
     assert run["http_status"] == 200
@@ -304,7 +322,9 @@ def test_downstream_llm_can_reference_ancestor_native_response_value(tmp_path, m
             }
         )
         body["edges"] = [
-            {"id": "edge-1", "source": "llm-1", "target": "llm-2"}
+            {"id": "start-llm", "source": "start", "target": "llm-1"},
+            {"id": "edge-1", "source": "llm-1", "target": "llm-2"},
+            {"id": "llm-end", "source": "llm-2", "target": "end"},
         ]
         client = TestClient(app)
         workflow = client.post("/api/workflow-drafts", json=body).json()["workflow"]
@@ -319,8 +339,8 @@ def test_downstream_llm_can_reference_ancestor_native_response_value(tmp_path, m
         server.shutdown()
         server.server_close()
 
-    assert first["status"] == "PASSED"
-    assert second["status"] == "PASSED"
+    assert first["status"] == "SUCCESS"
+    assert second["status"] == "SUCCESS"
     assert "first output" in second["input_snapshot"]["resolved_user_prompt"]
     assert second["output_variables"] == {"review_output": "first output"}
     groups = client.get(
@@ -372,10 +392,78 @@ def test_llm_node_stream_endpoint_emits_raw_chunks_and_persists_final_run(
     final = [payload for event, payload in events if event == "run"][0]
     assert "data:" in raw
     assert "stream output" not in raw
-    assert final["status"] == "PASSED"
+    assert final["status"] == "SUCCESS"
     assert final["output"] == raw
     assert final["response_body"] == raw
     assert final["usage"] is None
     assert final["request_body"]["stream"] is True
     assert final["output_variables"] == {}
     assert any("未执行解析" in event["message"] for event in final["events"])
+
+
+def test_llm_stream_can_be_interrupted_and_persists_partial_raw_response(
+    tmp_path, monkeypatch
+):
+    database_path = _patch_database(tmp_path, monkeypatch)
+    _create_provider(database_path, "http://gateway.invalid/v1")
+
+    class _SlowStream:
+        status_code = 200
+        headers = {"x-request-id": "slow-request"}
+        is_success = True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_text(self):
+            yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            await asyncio.sleep(30)
+
+    class _SlowClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return _SlowStream()
+
+    monkeypatch.setattr(routes_workflow_drafts.httpx, "AsyncClient", _SlowClient)
+    client = TestClient(app)
+    control_client = TestClient(app)
+    workflow = client.post(
+        "/api/workflow-drafts",
+        json=_workflow_body("http://gateway.invalid/v1", parameters={"stream": True}),
+    ).json()["workflow"]
+    stream_url = f"/api/workflow-drafts/{workflow['id']}/nodes/llm-1/runs/stream"
+    interrupt_url = f"/api/workflow-drafts/{workflow['id']}/nodes/llm-1/interrupt"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(lambda: client.post(stream_url))
+        time.sleep(0.1)
+        duplicate = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            duplicate = control_client.post(stream_url)
+            if duplicate.status_code == 409:
+                break
+            time.sleep(0.05)
+        assert duplicate is not None and duplicate.status_code == 409
+        time.sleep(0.2)
+        assert control_client.post(interrupt_url).json() == {"interrupted": True}
+        response = pending.result(timeout=10)
+
+    assert response.status_code == 200
+    runs = control_client.get(
+        f"/api/workflow-drafts/{workflow['id']}/nodes/llm-1/runs"
+    ).json()["runs"]
+    assert runs[0]["status"] == "INTERRUPTED"
+    assert "partial" in runs[0]["response_body"]
+    assert runs[0]["error"]["type"] == "INTERRUPTED"

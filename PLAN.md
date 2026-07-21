@@ -1213,7 +1213,7 @@ T13.2.1-T13.2.6 已完成
 - 13.4 已完成：浏览器真实 Script 成功运行以 `212ms` 进入 `PASSED`，展开日志显示原始 request/stdout/response/stderr，并提取 `browser_value=浏览器回归`；失败运行以 `222ms` 进入 `FAILED`，保留执行前 stdout、用户 stderr、Worker traceback 和路由 traceback。全量回归 `177 passed, 6 skipped, 1 warning in 16.92s`，构建、Python/JS 静态检查和 `git diff --check` 通过；临时 Workflow 删除后 GET 为 `404`。
 - 13.5 发布完成：提交 `7f15ac9`（`Add real workflow node execution logs`）已推送到 `origin/codex/tool-template-refactor`。
 
-#### Step 14：Workflow 与节点中断控制（pending clarification，2026-07-22）
+#### Step 14：Workflow 与节点中断控制（completed，2026-07-22）
 
 ##### 业务背景与目标（Why）
 
@@ -1231,6 +1231,121 @@ T13.2.1-T13.2.6 已完成
 - 中断节点在既定四状态中显示 `FAILED` 还是恢复 `PENDING`。
 - 在分支 Workflow 中，“后续节点”是仅指被中断节点的图后代，还是停止本次 Workflow 的所有剩余节点。
 - 当前按横坐标定时触发的画布演示调度是否在本步骤升级为依据连线的真实 DAG 调度。
+- 用户已确认：`PASSED` 全局更名为 `SUCCESS`，最终状态集合为 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；执行失败与用户中断严格区分；节点级中断仅停止当前节点及其图后代，独立分支继续；调度采用 `3B` 真实 DAG，依赖满足后独立分支并行。任一节点 `FAILED` 或 `INTERRUPTED` 后，其图后代在本次运行中保持未执行。
+
+##### Step 14 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 14.1 | 后端节点取消协议 | 活动运行注册、Worker/LLM 取消、`INTERRUPTED` 记录 | 重复运行拒绝、运行中中断、终态中断无副作用、日志回读 | 无 |
+| 14.2 | 并行 DAG 调度 | 节点/边、SUCCESS/FAILED/INTERRUPTED | 独立分支并行、后代阻断、失败分支不影响独立分支 | 14.1 |
+| 14.3 | 画布级控制 | 运行锁、计时器、顶部/右键中断 | 连续点击禁用、中断全部活动节点、重新从头运行 | 14.1-14.2 |
+| 14.4 | 节点级控制 | 卡片/右键/编辑器运行与中断 | 运行锁、三处中断一致、后代不执行、节点可重跑 | 14.1-14.3 |
+| 14.5 | 集成发布 | 完整 Workflow Studio | 专项/全量 pytest、构建、真实浏览器 E2E、推送 | 14.1-14.4 |
+
+##### 14.1 后端节点取消协议（completed，2026-07-22）
+
+- 状态契约：`WorkflowNodeRunStatus` 统一提供 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；SQLite 初始化会把历史 `PASSED` 行迁移为 `SUCCESS`，内部查询命名同步为 `latest_success_run`。
+- 活动运行：节点运行按 `(workflow_id, node_id)` 注册；同一节点已有活动运行时返回 HTTP `409`。活动 Worker 保存 `run_id`，中断接口终止 Worker 进程树；LLM 非流式任务取消当前 asyncio 任务。
+- 流式 LLM：响应生成器开始时绑定实际任务，支持中断前置竞态、运行中 `CancelledError` 和客户端断开后的清理；已接收的原始 chunk 保存到 `response_body`，最终记录为 `INTERRUPTED` 并保留 `INTERRUPTED` 错误事件。
+- API：新增 `POST /api/workflow-drafts/{workflow_id}/nodes/{node_id}/interrupt`；未运行、已完成或已中断节点返回 `{"interrupted": false}`，不创建额外运行记录。
+- 验证：`uv run pytest tests/test_workflow_node_runs.py::test_script_node_can_be_interrupted_and_rejects_duplicate_runs -q` 通过；`uv run pytest tests/test_llm_node_runs.py::test_llm_stream_can_be_interrupted_and_persists_partial_raw_response -q` 通过；两项均覆盖重复启动、运行中断、日志回读和中断后重跑/部分原始响应。现有 Workflow/LLM/节点专项合计 `23 passed, 1 warning`；Python 编译通过。
+- 依赖结论：后端节点级取消协议已具备稳定终态和清理语义，可以进入真实 DAG 调度实现；此前业务数据提取测试中的字符串 `PASSED` 保持原样，不属于运行状态。
+
+##### 14.2 并行 DAG 调度（completed，2026-07-22）
+
+- 调度规则：运行入口依据 Workflow 连线构建前驱表；无前驱节点同时进入就绪队列，独立分支通过 `Promise.race` 并行推进；只有节点返回 `SUCCESS` 才会解锁后继节点。
+- 失败隔离：节点返回 `FAILED` 或 `INTERRUPTED` 时，仅将其图后代标记为本次未执行并保持 UI `PENDING`；没有依赖关系的分支继续执行。Workflow 级中断会设置全局中断标记，停止活动节点且不再启动剩余节点。
+- 运行锁：Workflow 活动期间 `运行` 按钮禁用；同一节点通过 ref 活动表避免重复调用，节点运行结束或中断后可再次启动。节点卡片、右键菜单和编辑器标题栏共享同一中断回调。
+- 控件：画布运行按钮左侧显示累计耗时；“全局变量”右侧新增画布中断按钮；画布右键新增“中断测试”；节点卡片保留运行并新增中断，节点右键新增“中断此步骤”，编辑器标题栏同步提供运行/中断锁定状态。
+- 状态：前端统一展示 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`，节点运行历史摘要对 `INTERRUPTED` 显示中断错误而非伪造成功结果。
+- 验证：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`git diff --check` 通过；资源版本断言同步为 `v=28` 后，`uv run pytest tests/test_execution_frontend.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py -q` 结果为 `31 passed, 1 warning`，覆盖前端契约、Script/HTTP/LLM 执行和取消协议。
+
+##### 14.3 画布级控制（completed，2026-07-22）
+
+- 真实浏览器运行锁：临时 Workflow 进入运行后，顶部运行按钮禁用、中断按钮启用，累计计时器从 `810ms` 持续增长；活动 Script 节点同步显示 `RUNNING` 并禁用节点运行入口。
+- 顶部中断：点击顶部中断后，活动 Script 进入 `INTERRUPTED`，Workflow 提示“Workflow 已中断”，运行按钮重新启用且中断按钮禁用；本次计时器冻结在 `10.0s`。
+- 重新运行：中断后再次点击顶部运行，Script 重新进入 `RUNNING`，证明 Workflow 可从头启动新一轮执行；随后再次中断，终态仍稳定为 `INTERRUPTED`。
+- 右键中断：运行期间在画布空白区打开右键菜单，确认“中断测试”存在并可实际终止活动 Script；菜单关闭后节点保持 `INTERRUPTED`，未继续启动剩余节点。
+- 依赖结论：画布运行锁、累计计时、两处中断入口和中断后重跑已通过真实浏览器验收，可以进入节点三入口验收。
+
+##### 14.4 节点级控制（completed，2026-07-22）
+
+- 编辑器入口：30 秒 Script 运行时，编辑器运行按钮禁用、中断按钮启用，卡片耗时从 `0ms` 累加；点击编辑器中断后节点进入 `INTERRUPTED`，运行按钮恢复且中断按钮禁用。
+- 卡片入口：卡片运行后同样禁用重复运行并启用中断；点击卡片中断后状态为 `INTERRUPTED`，运行入口重新可用。
+- 右键入口：节点右键菜单显示“中断此步骤”，运行期间点击后真实终止 Worker，菜单关闭且节点进入 `INTERRUPTED`。
+- 原始日志：最近一次中断记录摘要显示 `07-22 03:28:23 / INTERRUPTED / 23.6s / 用户中断节点`；展开后保留原始 request 和原始 stdout `browser interrupt`，没有因中断丢弃运行前已输出内容。
+- 成功状态：同一节点此前完整运行记录在卡片和日志中均显示 `SUCCESS`，不再显示 `PASSED`。
+- 依赖结论：节点卡片、右键菜单和编辑器三处运行锁/中断语义一致，且中断日志满足原始输出铁律，可以进入集成发布回归。
+
+##### 14.5 集成发布（completed，2026-07-22）
+
+- 状态契约：源码、前端构建产物、测试和项目说明统一使用 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；历史 SQLite `PASSED` 自动迁移并有专项测试覆盖。
+- 调度与中断：后端阻塞/流式节点取消、同节点 `409` 运行锁、前端真实 DAG 并行、失败/中断后代阻断、画布和节点全部中断入口均完成。
+- 浏览器回归：覆盖编辑器、卡片、节点右键、画布顶部和画布右键五类入口；验证运行禁用、累计计时、原始 stdout 保留、中断终态和重新运行。
+- 最终回归并入 Step 15.3：全量 `185 passed, 6 skipped, 1 warning`，构建、JS/Python 静态检查和差异检查均通过。
+
+#### Step 15：禁止游离节点（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- Workflow 保存后会被真实 DAG 调度执行；若节点不在完整执行链上，用户容易误以为该节点会参与测试，实际却永远不会启动或无法汇入结束节点。
+- 目标是在不妨碍拖拽编辑的前提下，确保每个可执行节点都属于完整的 `START → ... → END` 有向路径。
+
+##### 用户与真实场景（Who / Where）
+
+- 用户：在 Workflow Studio 编排企业 Agent 测试流程的业务或测试工程师。
+- 场景：用户可以在编辑过程中临时断开节点；只有点击保存或运行时才需要得到明确错误，并定位所有不可从 START 到达或无法到达 END 的节点。
+
+##### 已确认范围与优先级（What / When）
+
+- 采用严格规则 `1A`：每个业务节点必须同时满足“可从 START 到达”和“可以到达 END”；完全无边、只有入边、只有出边、断裂分支均属于游离节点。
+- 采用双层校验 `2A`：前端保存/运行立即拦截，后端草稿保存和节点运行接口同步拒绝，避免绕过页面。
+- 仅在保存和执行时检测；拖拽、连线和删除过程不实时打断编辑。
+
+##### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 15.1 | 后端图完整性校验 | nodes/edges；结构化错误 | 合法 DAG、无边、不可达、死路、API 保存/运行拒绝 | 无 |
+| 15.2 | 前端保存/运行拦截 | 当前 React Flow 图；节点名称提示 | 前端专项断言与构建 | 15.1 |
+| 15.3 | 端到端回归与发布 | Workflow Studio 完整流程 | 真实浏览器、专项/全量测试、构建、推送 | 15.1-15.2 |
+
+##### 验收标准与价值验证（How to Measure）
+
+- 合法分支 DAG 可以保存和运行；任一业务节点不在完整 `START → END` 路径上时，保存和运行均失败。
+- 错误提示包含游离节点名称，用户无需逐条排查连线。
+- 直接调用后端 API 不能绕过规则；历史草稿仍可读取和编辑，在重新保存或运行时才触发校验。
+- 节点中断、`SUCCESS` 状态、原始日志和现有变量提取能力不受影响。
+
+##### 15.1 后端图完整性校验（completed，2026-07-22）
+
+- 共享规则：新增保存/执行时图校验；要求且仅允许一个 `START` 和一个 `END`，并通过正向可达集与反向可达集的交集判断每个节点是否处于完整 `START → END` 路径。
+- 错误定位：无边、从 START 不可达、无法到达 END 和断裂分支均返回 HTTP `422`，错误包含全部游离节点名称或 ID。
+- 历史兼容：规则不放入草稿 Pydantic 读取模型；历史无效草稿仍可 GET 和编辑，但 PUT 保存或节点执行时被拒绝。
+- 防绕过：草稿 POST/PUT、阻塞节点运行和流式 LLM 运行均调用同一后端校验；活动运行先原子注册，再校验并在失败时清理，保持重复运行 `409` 语义。
+- 测试夹具：Script/Agent/HTTP/LLM 执行用例统一升级为 `START → 业务节点 → END`，下游 LLM 用例升级为完整串行路径。
+- 验证：`uv run pytest tests/test_workflow_drafts.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py -q` 结果 `28 passed, 1 warning`；覆盖合法并行 DAG、无边、不可达、死路、更新绕过、历史草稿执行绕过、重复启动、中断及原始流日志。
+- 依赖结论：后端保存和执行边界已收敛，可以接入前端保存/运行即时提示。
+
+##### 15.2 前端保存/运行拦截（completed，2026-07-22）
+
+- 前端规则：React Flow 当前节点/边通过与后端一致的正向、反向可达性算法校验；缺少唯一 START/END 或存在不在完整路径上的节点时返回明确错误。
+- 触发时机：`persistDraft`、节点运行和画布运行三个入口调用校验；拖拽、连线、删除、复制和粘贴过程中不执行校验，允许用户临时断开图。
+- 交互结果：保存失败状态显示为“保存失败”，Toast 列出游离节点名称；运行不会启动计时器、不会把节点改成 `RUNNING`，也不会向后端发送执行请求。
+- 构建发布：`npm run build` 成功生成最新 JS/CSS bundle，首页资源版本递增为 `v=29`。
+- 验证：`node --check web/static/assets/workflow-canvas.js`、`git diff --check` 通过；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`。
+- 依赖结论：前后端规则一致，可以进入真实浏览器的无边、死路、合法路径保存/运行验收。
+
+##### 15.3 端到端回归与发布（completed，2026-07-22）
+
+- 浏览器无边场景：删除默认 HTTP 中间节点后点击保存，页面显示 `Workflow 存在游离节点: 开始, 执行企业 Agent, 模型质量判断, 规则校验, 完成`，状态变为“保存失败”；点击运行不会启动 Workflow 计时器、不会出现 `RUNNING`。
+- 浏览器合法场景：撤销删除恢复 `START → HTTP → AGENT → (LLM/SCRIPT) → END` 完整路径后保存成功并显示“Workflow 草稿已保存”。
+- 后端死路/不可达：专项覆盖无边、只有入边、只有出边和完整并行分支；直接 POST/PUT/节点运行 API 均按规则返回 `422` 或正常接受合法图。
+- 回归结果：全量 `uv run pytest -q` 为 `185 passed, 6 skipped, 1 warning in 18.60s`；专项草稿/节点/LLM/前端为 `37 passed, 1 warning`。
+- 构建检查：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`uv run python -m compileall -q execution web tests`、`git diff --check` 全部通过。
+- 状态契约：运行状态对外统一为 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；SQLite 历史 `PASSED` 仅作为一次性迁移输入，普通响应字段中的同名业务值保持原样。
+- 安全：代码、测试、文档和构建产物未发现用户 API Key 候选；浏览器临时 Workflow 已删除，API 列表回到 0 条。
 
 ## 22. 待优化项目
 

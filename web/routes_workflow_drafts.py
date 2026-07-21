@@ -2,8 +2,10 @@
 
 import json
 import asyncio
+import threading
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,7 +14,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import httpx
 from pydantic import BaseModel, ConfigDict
-from web.tool_runtime import stream_tool_worker
+from web.tool_runtime import interrupt_tool_run, stream_tool_worker
 
 from execution import (
     DEFAULT_DATABASE_PATH,
@@ -35,6 +37,7 @@ from execution import (
     extract_output_variables,
     node_output_mappings,
     resolve_templates,
+    validate_complete_workflow_graph,
 )
 
 
@@ -42,6 +45,77 @@ router = APIRouter(prefix="/api/workflow-drafts", tags=["workflow-drafts"])
 DATABASE_PATH = DEFAULT_DATABASE_PATH
 _repository_instance: WorkflowDraftRepository | None = None
 _repository_path: Path | None = None
+
+
+@dataclass
+class _ActiveNodeRun:
+    task: asyncio.Task[Any] | None
+    loop: asyncio.AbstractEventLoop
+    worker_run_id: str | None = None
+    interrupted: bool = False
+
+
+_ACTIVE_NODE_RUNS: dict[tuple[str, str], _ActiveNodeRun] = {}
+_ACTIVE_NODE_RUNS_LOCK = threading.Lock()
+_CURRENT_TASK = object()
+
+
+def _register_active_node_run(
+    workflow_id: str,
+    node_id: str,
+    *,
+    task: asyncio.Task[Any] | None | object = _CURRENT_TASK,
+) -> _ActiveNodeRun:
+    key = (workflow_id, node_id)
+    active = _ActiveNodeRun(
+        task=asyncio.current_task() if task is _CURRENT_TASK else task,
+        loop=asyncio.get_running_loop(),
+    )
+    with _ACTIVE_NODE_RUNS_LOCK:
+        if key in _ACTIVE_NODE_RUNS:
+            raise HTTPException(409, "节点正在运行，请勿重复启动")
+        _ACTIVE_NODE_RUNS[key] = active
+    return active
+
+
+def _set_active_task(active: _ActiveNodeRun) -> None:
+    with _ACTIVE_NODE_RUNS_LOCK:
+        active.task = asyncio.current_task()
+        interrupted = active.interrupted
+    if interrupted and active.task is not None and not active.task.done():
+        active.loop.call_soon_threadsafe(active.task.cancel)
+
+
+def _set_active_worker_run(active: _ActiveNodeRun, worker_run_id: str) -> None:
+    with _ACTIVE_NODE_RUNS_LOCK:
+        active.worker_run_id = worker_run_id
+        interrupted = active.interrupted
+    if interrupted:
+        interrupt_tool_run(worker_run_id)
+
+
+def _unregister_active_node_run(
+    workflow_id: str, node_id: str, active: _ActiveNodeRun
+) -> None:
+    key = (workflow_id, node_id)
+    with _ACTIVE_NODE_RUNS_LOCK:
+        if _ACTIVE_NODE_RUNS.get(key) is active:
+            del _ACTIVE_NODE_RUNS[key]
+
+
+def _interrupt_active_node_run(workflow_id: str, node_id: str) -> bool:
+    with _ACTIVE_NODE_RUNS_LOCK:
+        active = _ACTIVE_NODE_RUNS.get((workflow_id, node_id))
+        if active is None or active.interrupted:
+            return False
+        active.interrupted = True
+        worker_run_id = active.worker_run_id
+        task = active.task
+    if worker_run_id:
+        interrupt_tool_run(worker_run_id)
+    elif task is not None and not task.done():
+        active.loop.call_soon_threadsafe(task.cancel)
+    return True
 
 
 class _StrictModel(BaseModel):
@@ -62,6 +136,10 @@ class WorkflowNodeRunListResponse(_StrictModel):
 
 class WorkflowNodeRunEnvelope(_StrictModel):
     run: WorkflowNodeRunRecord
+
+
+class WorkflowNodeInterruptResponse(_StrictModel):
+    interrupted: bool
 
 
 class WorkflowVariableItem(_StrictModel):
@@ -97,6 +175,13 @@ def get_workflow_or_404(workflow_id: str) -> WorkflowDraftRecord:
     return workflow
 
 
+def _validate_complete_graph(workflow: WorkflowDraftConfiguration) -> None:
+    try:
+        validate_complete_workflow_graph(workflow.nodes, workflow.edges)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("", response_model=WorkflowDraftListResponse)
 def list_workflow_drafts() -> WorkflowDraftListResponse:
     return WorkflowDraftListResponse(workflows=get_repository().list_drafts())
@@ -106,6 +191,7 @@ def list_workflow_drafts() -> WorkflowDraftListResponse:
 def create_workflow_draft(
     body: WorkflowDraftConfiguration,
 ) -> WorkflowDraftEnvelope:
+    _validate_complete_graph(body)
     try:
         workflow = get_repository().create_draft(
             WorkflowDraftRecord(**body.model_dump(mode="json"))
@@ -125,6 +211,7 @@ def update_workflow_draft(
     workflow_id: str,
     body: WorkflowDraftConfiguration,
 ) -> WorkflowDraftEnvelope:
+    _validate_complete_graph(body)
     current = get_workflow_or_404(workflow_id)
     updated = WorkflowDraftRecord(
         id=current.id,
@@ -258,6 +345,7 @@ async def _run_python_or_http_node(
     workflow: WorkflowDraftRecord,
     node: dict[str, Any],
     repository: WorkflowDraftRepository,
+    active: _ActiveNodeRun,
 ) -> WorkflowNodeRunRecord:
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
     node_type = data.get("nodeType")
@@ -311,11 +399,13 @@ async def _run_python_or_http_node(
         else:
             raise ValueError(f"不支持真实执行的节点类型: {node_type}")
         events.append(_event("INFO", "开始执行子进程"))
+        worker_run_id = uuid4().hex
+        _set_active_worker_run(active, worker_run_id)
         worker_result = await asyncio.to_thread(
             stream_tool_worker,
             worker_payload,
             lambda message: events.append(_event("INFO", message)),
-            uuid4().hex,
+            worker_run_id,
             timeout_seconds,
         )
         raw_response = worker_result.get("response") if "response" in worker_result else None
@@ -326,6 +416,25 @@ async def _run_python_or_http_node(
         if http_status is None and isinstance(raw_response, dict):
             http_status = raw_response.get("status_code")
         events.append(_event("INFO", "子进程执行完成"))
+        if worker_result.get("interrupted"):
+            return run.model_copy(update={
+                "status": WorkflowNodeRunStatus.INTERRUPTED,
+                "finished_at": utc_now_iso(),
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+                "input_snapshot": input_snapshot,
+                "request_body": logged_request,
+                "events": events + [_event("WARN", "用户中断节点")],
+                "output": raw_response,
+                "stdout": stdout,
+                "stderr": stderr,
+                "response_body": response_body,
+                "http_status": http_status,
+                "error": {
+                    "type": "INTERRUPTED",
+                    "message": "用户中断节点",
+                    "traceback": "",
+                },
+            })
         if not worker_result.get("ok"):
             message = str(worker_result.get("error") or "节点执行失败")
             raise RuntimeError(message)
@@ -336,7 +445,7 @@ async def _run_python_or_http_node(
         )
         events.append(_event("INFO", "输出变量提取完成"))
         return run.model_copy(update={
-            "status": WorkflowNodeRunStatus.PASSED,
+            "status": WorkflowNodeRunStatus.SUCCESS,
             "finished_at": utc_now_iso(),
             "duration_ms": round((time.perf_counter() - started) * 1000),
             "input_snapshot": input_snapshot,
@@ -348,6 +457,25 @@ async def _run_python_or_http_node(
             "response_body": response_body,
             "output_variables": output_variables,
             "http_status": http_status,
+        })
+    except asyncio.CancelledError:
+        events.append(_event("WARN", "用户中断节点"))
+        worker_result = locals().get("worker_result", {})
+        raw_response = worker_result.get("response") if isinstance(worker_result, dict) else None
+        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and "response" in worker_result else ""
+        return run.model_copy(update={
+            "status": WorkflowNodeRunStatus.INTERRUPTED,
+            "finished_at": utc_now_iso(),
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "input_snapshot": input_snapshot,
+            "request_body": logged_request,
+            "events": events,
+            "output": raw_response,
+            "stdout": str(worker_result.get("stdout", "")) if isinstance(worker_result, dict) else "",
+            "stderr": str(worker_result.get("stderr", "")) if isinstance(worker_result, dict) else "",
+            "response_body": response_body,
+            "http_status": worker_result.get("http_status") if isinstance(worker_result, dict) else None,
+            "error": {"type": "INTERRUPTED", "message": "用户中断节点", "traceback": ""},
         })
     except Exception as exc:
         message = str(exc)
@@ -386,7 +514,7 @@ def _latest_output_values(
     workflow_id: str,
     node: dict[str, Any],
 ) -> tuple[dict[str, Any], WorkflowNodeRunRecord | None]:
-    run = repository.latest_passed_run(workflow_id, node["id"])
+    run = repository.latest_success_run(workflow_id, node["id"])
     return (run.output_variables if run else {}), run
 
 
@@ -457,20 +585,17 @@ def get_workflow_node_variables(
     return WorkflowVariableGroupsResponse(groups=groups)
 
 
-@router.post(
-    "/{workflow_id}/nodes/{node_id}/runs",
-    response_model=WorkflowNodeRunEnvelope,
-)
-async def run_llm_node(
+async def _run_node_without_registry(
     workflow_id: str,
     node_id: str,
+    active: _ActiveNodeRun,
 ) -> WorkflowNodeRunEnvelope:
     workflow = get_workflow_or_404(workflow_id)
     node = _find_node(workflow, node_id)
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
     if data.get("nodeType") in {"HTTP", "AGENT", "SCRIPT"}:
         repository = get_repository()
-        run = await _run_python_or_http_node(workflow, node, repository)
+        run = await _run_python_or_http_node(workflow, node, repository, active)
         repository.finish_run(run)
         return WorkflowNodeRunEnvelope(run=run)
     provider_id = data.get("providerId") if isinstance(data.get("providerId"), str) else ""
@@ -558,7 +683,7 @@ async def run_llm_node(
         events.append(_event("INFO", "模型输出接收完成"))
         completed = running.model_copy(
             update={
-                "status": WorkflowNodeRunStatus.PASSED,
+                "status": WorkflowNodeRunStatus.SUCCESS,
                 "finished_at": utc_now_iso(),
                 "duration_ms": round((time.perf_counter() - started) * 1000),
                 "provider_name": provider_name,
@@ -572,6 +697,24 @@ async def run_llm_node(
                 "usage": parsed["usage"],
                 "http_status": response.status_code,
                 "request_id": request_id,
+            }
+        )
+    except asyncio.CancelledError:
+        events.append(_event("WARN", "用户中断节点"))
+        completed = running.model_copy(
+            update={
+                "status": WorkflowNodeRunStatus.INTERRUPTED,
+                "finished_at": utc_now_iso(),
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+                "provider_name": provider_name,
+                "model_name": model_name,
+                "input_snapshot": input_snapshot,
+                "request_body": request_body,
+                "events": events,
+                "response_body": response_body,
+                "http_status": http_status,
+                "request_id": request_id,
+                "error": {"type": "INTERRUPTED", "message": "用户中断节点", "traceback": ""},
             }
         )
     except Exception as exc:
@@ -601,6 +744,36 @@ async def run_llm_node(
     return WorkflowNodeRunEnvelope(run=completed)
 
 
+@router.post(
+    "/{workflow_id}/nodes/{node_id}/runs",
+    response_model=WorkflowNodeRunEnvelope,
+)
+async def run_workflow_node(
+    workflow_id: str,
+    node_id: str,
+) -> WorkflowNodeRunEnvelope:
+    active = _register_active_node_run(workflow_id, node_id)
+    try:
+        _validate_complete_graph(get_workflow_or_404(workflow_id))
+        return await _run_node_without_registry(workflow_id, node_id, active)
+    finally:
+        _unregister_active_node_run(workflow_id, node_id, active)
+
+
+@router.post(
+    "/{workflow_id}/nodes/{node_id}/interrupt",
+    response_model=WorkflowNodeInterruptResponse,
+)
+def interrupt_workflow_node(
+    workflow_id: str,
+    node_id: str,
+) -> WorkflowNodeInterruptResponse:
+    get_workflow_or_404(workflow_id)
+    return WorkflowNodeInterruptResponse(
+        interrupted=_interrupt_active_node_run(workflow_id, node_id)
+    )
+
+
 def _sse_event(event: str, payload: Any) -> str:
     return (
         f"event: {event}\n"
@@ -613,10 +786,17 @@ async def stream_llm_node(
     workflow_id: str,
     node_id: str,
 ) -> StreamingResponse:
-    workflow = get_workflow_or_404(workflow_id)
-    node = _find_node(workflow, node_id)
+    active = _register_active_node_run(workflow_id, node_id, task=None)
+    try:
+        workflow = get_workflow_or_404(workflow_id)
+        _validate_complete_graph(workflow)
+        node = _find_node(workflow, node_id)
+    except Exception:
+        _unregister_active_node_run(workflow_id, node_id, active)
+        raise
 
     async def generate():
+        _set_active_task(active)
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
         provider_id = data.get("providerId") if isinstance(data.get("providerId"), str) else ""
         model_name = data.get("modelName") if isinstance(data.get("modelName"), str) else ""
@@ -645,7 +825,12 @@ async def stream_llm_node(
         response_body = ""
         http_status: int | None = None
         request_id: str | None = None
+        safe_parts: list[str] = []
         try:
+            with _ACTIVE_NODE_RUNS_LOCK:
+                interrupted_before_start = active.interrupted
+            if interrupted_before_start:
+                raise asyncio.CancelledError
             if data.get("nodeType") != "LLM":
                 raise ValueError("只有 LLM 节点可使用模型网关执行")
             if not provider_id or not model_name:
@@ -678,7 +863,6 @@ async def stream_llm_node(
             )
             events.append(_event("INFO", f"流式请求模型 {provider_name} / {model_name}"))
             original_parts: list[str] = []
-            safe_parts: list[str] = []
             async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
                 async with client.stream(
                     "POST",
@@ -696,6 +880,7 @@ async def stream_llm_node(
                         original_parts.append(chunk)
                         safe_chunk = redact_sensitive_text(chunk, api_key)
                         safe_parts.append(safe_chunk)
+                        response_body = "".join(safe_parts)
                         yield _sse_event("raw", {"chunk": safe_chunk})
                     original_body = "".join(original_parts)
                     response_body = "".join(safe_parts)
@@ -710,7 +895,7 @@ async def stream_llm_node(
             events.append(_event("INFO", "流式原始响应接收完成，未执行解析"))
             completed = running.model_copy(
                 update={
-                    "status": WorkflowNodeRunStatus.PASSED,
+                    "status": WorkflowNodeRunStatus.SUCCESS,
                     "finished_at": utc_now_iso(),
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                     "provider_name": provider_name,
@@ -726,7 +911,27 @@ async def stream_llm_node(
                     "request_id": request_id,
                 }
             )
+        except asyncio.CancelledError:
+            response_body = "".join(safe_parts)
+            events.append(_event("WARN", "用户中断节点"))
+            completed = running.model_copy(
+                update={
+                    "status": WorkflowNodeRunStatus.INTERRUPTED,
+                    "finished_at": utc_now_iso(),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "provider_name": provider_name,
+                    "model_name": model_name,
+                    "input_snapshot": input_snapshot,
+                    "request_body": request_body,
+                    "events": events,
+                    "response_body": response_body,
+                    "http_status": http_status,
+                    "request_id": request_id,
+                    "error": {"type": "INTERRUPTED", "message": "用户中断节点", "traceback": ""},
+                }
+            )
         except Exception as exc:
+            response_body = "".join(safe_parts) or response_body
             message = redact_sensitive_text(str(exc), api_key)
             events.append(_event("ERROR", message))
             completed = running.model_copy(
@@ -752,8 +957,15 @@ async def stream_llm_node(
         repository.finish_run(completed)
         yield _sse_event("run", completed.model_dump(mode="json"))
 
+    async def tracked_generate():
+        try:
+            async for item in generate():
+                yield item
+        finally:
+            _unregister_active_node_run(workflow_id, node_id, active)
+
     return StreamingResponse(
-        generate(),
+        tracked_generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

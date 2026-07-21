@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
@@ -19,16 +21,34 @@ def _patch_database(tmp_path, monkeypatch):
 
 
 def _node_body(node_type: str, data: dict) -> dict:
+    node_id = f"{node_type.lower()}-1"
     return {
         "name": f"{node_type} 真实执行",
         "description": "",
-        "nodes": [{
-            "id": f"{node_type.lower()}-1",
-            "type": "workflowNode",
-            "position": {"x": 0, "y": 0},
-            "data": {"nodeType": node_type, **data},
-        }],
-        "edges": [],
+        "nodes": [
+            {
+                "id": "start",
+                "type": "workflowNode",
+                "position": {"x": 0, "y": 0},
+                "data": {"nodeType": "START", "label": "开始"},
+            },
+            {
+                "id": node_id,
+                "type": "workflowNode",
+                "position": {"x": 200, "y": 0},
+                "data": {"nodeType": node_type, **data},
+            },
+            {
+                "id": "end",
+                "type": "workflowNode",
+                "position": {"x": 400, "y": 0},
+                "data": {"nodeType": "END", "label": "完成"},
+            },
+        ],
+        "edges": [
+            {"id": "start-node", "source": "start", "target": node_id},
+            {"id": "node-end", "source": node_id, "target": "end"},
+        ],
         "global_variables": [{"id": "question", "name": "question", "value": "退款"}],
     }
 
@@ -65,7 +85,7 @@ def test_script_and_agent_preserve_raw_stdout_stderr_and_extract_response(
         workflow = client.post("/api/workflow-drafts", json=body).json()["workflow"]
         run = _run(client, workflow, node_type)
 
-        assert run["status"] == "PASSED"
+        assert run["status"] == "SUCCESS"
         assert run["stdout"] == "raw stdout\n"
         assert run["stderr"] == "raw stderr\n"
         assert json.loads(run["response_body"])["items"][0]["id"] == 3
@@ -161,7 +181,7 @@ def test_http_preserves_raw_response_and_extracts_body(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
 
-    assert run["status"] == "PASSED"
+    assert run["status"] == "SUCCESS"
     assert run["stdout"] == ""
     assert run["stderr"] == ""
     assert json.loads(run["response_body"])["body"]["body"] == '{"question": "退款"}'
@@ -227,3 +247,72 @@ def test_http_configuration_failure_is_persisted(tmp_path, monkeypatch):
         f"/api/workflow-drafts/{workflow['id']}/nodes/http-1/runs"
     ).json()["runs"]
     assert listed == [run]
+
+
+def test_script_node_can_be_interrupted_and_rejects_duplicate_runs(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
+    workflow_client = TestClient(app)
+    control_client = TestClient(app)
+    workflow = workflow_client.post("/api/workflow-drafts", json=_node_body(
+        "SCRIPT",
+        {
+            "mainPy": (
+                "import time\n"
+                "print('before interrupt', flush=True)\n"
+                "time.sleep(30)\n"
+                "response = {'finished': True}\n"
+            )
+        },
+    )).json()["workflow"]
+    run_url = f"/api/workflow-drafts/{workflow['id']}/nodes/script-1/runs"
+    interrupt_url = f"/api/workflow-drafts/{workflow['id']}/nodes/script-1/interrupt"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(lambda: workflow_client.post(run_url))
+        time.sleep(0.1)
+        duplicate = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            duplicate = control_client.post(run_url)
+            if duplicate.status_code == 409:
+                break
+            time.sleep(0.05)
+        assert duplicate is not None
+        assert duplicate.status_code == 409
+
+        time.sleep(0.5)
+        interrupted = control_client.post(interrupt_url)
+        assert interrupted.status_code == 200
+        assert interrupted.json() == {"interrupted": True}
+        response = pending.result(timeout=10)
+
+    assert response.status_code == 200
+    run = response.json()["run"]
+    assert run["status"] == "INTERRUPTED"
+    assert run["stdout"] == "before interrupt\n"
+    assert run["error"] == {
+        "type": "INTERRUPTED",
+        "message": "用户中断节点",
+        "traceback": "",
+    }
+    assert control_client.post(interrupt_url).json() == {"interrupted": False}
+    assert control_client.get(
+        f"/api/workflow-drafts/{workflow['id']}/nodes/script-1/runs"
+    ).json()["runs"][0] == run
+
+    rerun_nodes = json.loads(json.dumps(workflow["nodes"]))
+    script_node = next(node for node in rerun_nodes if node["id"] == "script-1")
+    script_node["data"]["mainPy"] = "response = {'rerun': True}\n"
+    rerun_body = {
+        "name": workflow["name"],
+        "description": workflow["description"],
+        "nodes": rerun_nodes,
+        "edges": workflow["edges"],
+        "global_variables": workflow["global_variables"],
+    }
+    assert control_client.put(
+        f"/api/workflow-drafts/{workflow['id']}", json=rerun_body
+    ).status_code == 200
+    rerun = control_client.post(run_url).json()["run"]
+    assert rerun["status"] == "SUCCESS"
+    assert rerun["output"] == {"rerun": True}

@@ -173,6 +173,37 @@ body.workflow-studio-open {
     background: #f5f7fa;
 }
 
+.wf-header-actions button:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.wf-header-actions .wf-danger-button {
+    border-color: #f0b8c1;
+    color: #b4233d;
+}
+
+.wf-header-actions .wf-danger-button:hover:not(:disabled) {
+    border-color: #d96579;
+    background: #fff1f3;
+}
+
+.wf-workflow-timer {
+    display: inline-flex;
+    min-width: 58px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    color: #697586;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+}
+
+.wf-workflow-timer.is-running svg {
+    color: #2563eb;
+    animation: wf-execution-spin 0.8s linear infinite;
+}
+
 .wf-header-actions .wf-primary-button:hover {
     border-color: #1949bd;
     background: #1949bd;
@@ -353,6 +384,15 @@ body.workflow-studio-open {
     color: var(--node-accent);
 }
 
+.wf-node-actions button:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+
+.wf-node-actions button.is-danger:not(:disabled) {
+    color: #c62828;
+}
+
 .wf-node-save-toast {
     position: absolute;
     z-index: 50;
@@ -426,11 +466,11 @@ body.workflow-studio-open {
     box-shadow: 0 0 0 4px #dbeafe;
 }
 
-.wf-node-status.is-passed {
+.wf-node-status.is-success {
     color: #16803c;
 }
 
-.wf-node-status.is-passed i {
+.wf-node-status.is-success i {
     background: #22a35a;
 }
 
@@ -440,6 +480,14 @@ body.workflow-studio-open {
 
 .wf-node-status.is-failed i {
     background: #dc2626;
+}
+
+.wf-node-status.is-interrupted {
+    color: #a15c16;
+}
+
+.wf-node-status.is-interrupted i {
+    background: #d97706;
 }
 
 .wf-node-runtime {
@@ -488,14 +536,19 @@ body.workflow-studio-open {
     animation: wf-execution-spin 0.8s linear infinite;
 }
 
-.wf-node-execution.is-passed,
-.wf-node-execution.is-passed .wf-execution-spinner {
+.wf-node-execution.is-success,
+.wf-node-execution.is-success .wf-execution-spinner {
     color: #16803c;
 }
 
 .wf-node-execution.is-failed,
 .wf-node-execution.is-failed .wf-execution-spinner {
     color: #c62828;
+}
+
+.wf-node-execution.is-interrupted,
+.wf-node-execution.is-interrupted .wf-execution-spinner {
+    color: #a15c16;
 }
 
 @keyframes wf-execution-spin {
@@ -1273,6 +1326,11 @@ body.workflow-studio-open {
     border-color: #b9c9eb;
     background: #edf2ff;
     color: var(--wf-blue);
+}
+
+.wf-inspector-actions button.is-danger:not(:disabled) {
+    border-color: #efc2ca;
+    color: #b4233d;
 }
 
 .wf-node-variable-panel {
@@ -2168,6 +2226,10 @@ body.workflow-studio-open {
     border-color: #f2c6cf;
 }
 
+.wf-llm-run.is-interrupted {
+    border-color: #f1d2ad;
+}
+
 .wf-llm-run-summary {
     display: grid;
     width: 100%;
@@ -2211,6 +2273,10 @@ body.workflow-studio-open {
 
 .wf-llm-run.is-failed .wf-llm-run-summary strong {
     color: #c72e4e;
+}
+
+.wf-llm-run.is-interrupted .wf-llm-run-summary strong {
+    color: #a15c16;
 }
 
 .wf-llm-run-result {

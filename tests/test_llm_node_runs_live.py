@@ -116,7 +116,7 @@ def test_real_llm_node_api_persists_business_evaluation_without_token_limit(
 
     assert run_response.status_code == 200
     run = run_response.json()["run"]
-    assert run["status"] == "PASSED"
+    assert run["status"] == "SUCCESS"
     assert run["provider_name"] == "Live Provider"
     assert run["model_name"] == model_name
     assert run["http_status"] == 200

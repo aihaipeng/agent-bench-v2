@@ -19,8 +19,8 @@ def test_execution_assets_and_navigation_are_registered():
     assert 'data-view="runs"' not in index_html
     assert "运行中心" not in index_html
     assert '<link rel="stylesheet" href="/execution.css" />' in index_html
-    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=27" />' in index_html
-    assert '<script src="/assets/workflow-canvas.js?v=27"></script>' in index_html
+    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=29" />' in index_html
+    assert '<script src="/assets/workflow-canvas.js?v=29"></script>' in index_html
     assert '<script src="/execution.js"></script>' in index_html
     assert 'name="viewport"' not in index_html
     assert "viewTargets();" in app_js
@@ -173,10 +173,15 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "function parameterDataSummary(value)" in canvas_jsx
     assert "正在接收原始响应…" in canvas_jsx
     assert "text.length > 180" in canvas_jsx
-    assert "const NODE_STATUSES = ['PENDING', 'RUNNING', 'PASSED', 'FAILED']" in canvas_jsx
+    assert "const NODE_STATUSES = ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'INTERRUPTED']" in canvas_jsx
+    assert "function validateCompleteWorkflowGraph(nodes, edges)" in canvas_jsx
+    assert "Workflow 存在游离节点" in canvas_jsx
+    assert "const reachableFromStart = walk(adjacency, starts[0].id)" in canvas_jsx
+    assert "const canReachEnd = walk(reverse, ends[0].id)" in canvas_jsx
+    assert canvas_jsx.count("validateCompleteWorkflowGraph(nodes, edges)") >= 4
     assert "status: 'PENDING'" in canvas_jsx
     assert "status: 'RUNNING'" in canvas_jsx
-    assert "status: 'PASSED'" in canvas_jsx
+    assert "SUCCESS" in canvas_jsx
     assert "function formatExecutionDuration(value)" in canvas_jsx
     assert "executionDurationMs: 0" in canvas_jsx
     assert "Date.now() - startedAtMs" in canvas_jsx
@@ -206,7 +211,7 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "parameterDataText(selectedParameter.data, true)" in canvas_jsx
     assert "selectedParameter.artifact?.href" in canvas_jsx
     assert ".wf-node-actions" in canvas_css
-    assert ".wf-node-status.is-passed" in canvas_css
+    assert ".wf-node-status.is-success" in canvas_css
     assert "border-top: 3px solid var(--node-accent)" not in canvas_css
     assert ".wf-node.is-selected" in canvas_css
     assert "border-color: #16a34a" in canvas_css

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from fastapi.testclient import TestClient
 import pytest
@@ -29,9 +30,24 @@ def _graph_body(name="客服评测流程") -> dict:
                     "modelName": "model-1",
                     "modelParameters": {},
                 },
-            }
+            },
+            {
+                "id": "start",
+                "type": "workflowNode",
+                "position": {"x": 0, "y": 0},
+                "data": {"nodeType": "START", "label": "开始"},
+            },
+            {
+                "id": "end",
+                "type": "workflowNode",
+                "position": {"x": 400, "y": 0},
+                "data": {"nodeType": "END", "label": "完成"},
+            },
         ],
-        "edges": [],
+        "edges": [
+            {"id": "start-llm", "source": "start", "target": "llm-1"},
+            {"id": "llm-end", "source": "llm-1", "target": "end"},
+        ],
         "global_variables": [{"id": "v-1", "name": "question", "value": "退款"}],
     }
 
@@ -49,7 +65,7 @@ def _finished_run(workflow_id: str, sequence: int) -> WorkflowNodeRunRecord:
         id=f"run-{sequence:02d}",
         workflow_id=workflow_id,
         node_id="llm-1",
-        status=WorkflowNodeRunStatus.PASSED,
+        status=WorkflowNodeRunStatus.SUCCESS,
         started_at=f"2026-07-21T10:00:{sequence:02d}.000+00:00",
         finished_at=f"2026-07-21T10:00:{sequence:02d}.100+00:00",
         duration_ms=100,
@@ -98,6 +114,31 @@ def test_workflow_draft_repository_restart_retention_and_cascade(tmp_path):
 
     assert restarted.delete_draft(workflow.id) is True
     assert restarted.list_node_runs(workflow.id, "llm-1") == []
+
+
+def test_workflow_node_run_migrates_legacy_passed_status_to_success(tmp_path):
+    database_path = tmp_path / "agent_bench.sqlite3"
+    repository = WorkflowDraftRepository(database_path)
+    workflow = repository.create_draft(
+        WorkflowDraftRecord(id="workflow-legacy", **_graph_body())
+    )
+    repository.create_run(
+        WorkflowNodeRunRecord(
+            id="legacy-run",
+            workflow_id=workflow.id,
+            node_id="llm-1",
+        )
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE workflow_node_runs SET status = 'PASSED' WHERE id = 'legacy-run'"
+        )
+        connection.commit()
+
+    restarted = WorkflowDraftRepository(database_path)
+    runs = restarted.list_node_runs(workflow.id, "llm-1")
+
+    assert runs[0].status == WorkflowNodeRunStatus.SUCCESS
 
 
 def test_workflow_draft_api_crud_and_persistent_run_listing(tmp_path, monkeypatch):
@@ -166,6 +207,85 @@ def test_workflow_draft_api_rejects_invalid_graph(tmp_path, monkeypatch, body):
     assert TestClient(app).post("/api/workflow-drafts", json=body).status_code == 422
 
 
+@pytest.mark.parametrize("mode", ["no_edges", "unreachable", "dead_end"])
+def test_workflow_draft_api_rejects_nodes_outside_start_end_path(
+    tmp_path, monkeypatch, mode
+):
+    _patch_database(tmp_path, monkeypatch)
+    body = _graph_body()
+    orphan = {
+        "id": "script-orphan",
+        "type": "workflowNode",
+        "position": {"x": 200, "y": 160},
+        "data": {"nodeType": "SCRIPT", "label": "游离脚本"},
+    }
+    if mode == "no_edges":
+        body["edges"] = []
+    else:
+        body["nodes"].append(orphan)
+        body["edges"].append({
+            "id": f"orphan-{mode}",
+            "source": "script-orphan" if mode == "unreachable" else "llm-1",
+            "target": "end" if mode == "unreachable" else "script-orphan",
+        })
+
+    response = TestClient(app).post("/api/workflow-drafts", json=body)
+
+    assert response.status_code == 422
+    assert "Workflow 存在游离节点" in response.text
+    if mode != "no_edges":
+        assert "游离脚本" in response.text
+
+
+def test_workflow_draft_accepts_parallel_complete_paths(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
+    body = _graph_body()
+    script = {
+        "id": "script-1",
+        "type": "workflowNode",
+        "position": {"x": 200, "y": 160},
+        "data": {"nodeType": "SCRIPT", "label": "规则校验"},
+    }
+    body["nodes"].append(script)
+    body["edges"].extend([
+        {"id": "start-script", "source": "start", "target": "script-1"},
+        {"id": "script-end", "source": "script-1", "target": "end"},
+    ])
+
+    response = TestClient(app).post("/api/workflow-drafts", json=body)
+
+    assert response.status_code == 200
+
+
+def test_update_and_run_api_cannot_bypass_complete_path_validation(
+    tmp_path, monkeypatch
+):
+    database_path = _patch_database(tmp_path, monkeypatch)
+    client = TestClient(app)
+    created = client.post("/api/workflow-drafts", json=_graph_body()).json()["workflow"]
+    invalid_update = _graph_body(name="invalid update")
+    invalid_update["edges"] = []
+
+    update = client.put(
+        f"/api/workflow-drafts/{created['id']}", json=invalid_update
+    )
+
+    assert update.status_code == 422
+    assert client.get(f"/api/workflow-drafts/{created['id']}").json()["workflow"]["name"] == "客服评测流程"
+
+    historical = _graph_body(name="historical invalid")
+    historical["nodes"] = [historical["nodes"][0]]
+    historical["edges"] = []
+    WorkflowDraftRepository(database_path).create_draft(
+        WorkflowDraftRecord(id="historical-invalid", **historical)
+    )
+    run = client.post(
+        "/api/workflow-drafts/historical-invalid/nodes/llm-1/runs"
+    )
+    assert run.status_code == 422
+    assert "START" in run.text
+
+
 def test_workflow_draft_rejects_visible_variable_name_conflicts(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     body = _graph_body()
@@ -200,18 +320,22 @@ def test_workflow_draft_rejects_unknown_output_variable_type(tmp_path, monkeypat
     assert "不支持的输出变量类型: DATE" in response.text
 
 
-def test_isolated_branches_may_reuse_output_name_until_they_merge(tmp_path, monkeypatch):
+def test_parallel_branches_are_valid_but_conflicting_outputs_are_rejected(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     base_node = _graph_body()["nodes"][0]
     left = json.loads(json.dumps(base_node))
     right = json.loads(json.dumps(base_node))
+    start = json.loads(json.dumps(base_node))
     end = json.loads(json.dumps(base_node))
-    left["id"], right["id"], end["id"] = "left", "right", "end"
-    left["data"]["label"], right["data"]["label"], end["data"]["label"] = (
+    left["id"], right["id"], start["id"], end["id"] = "left", "right", "start", "end"
+    left["data"]["label"], right["data"]["label"], start["data"]["label"], end["data"]["label"] = (
         "Left",
         "Right",
+        "开始",
         "End",
     )
+    start["data"]["nodeType"] = "START"
+    end["data"]["nodeType"] = "END"
     for node in (left, right):
         node["data"]["outputVariables"] = [
             {"id": f"output-{node['id']}", "name": "same", "value": "response.result"}
@@ -220,18 +344,16 @@ def test_isolated_branches_may_reuse_output_name_until_they_merge(tmp_path, monk
     isolated = {
         "name": "isolated",
         "description": "",
-        "nodes": [left, right, end],
-        "edges": [],
+        "nodes": [start, left, right, end],
+        "edges": [
+            {"id": "start-left", "source": "start", "target": "left"},
+            {"id": "start-right", "source": "start", "target": "right"},
+            {"id": "left-end", "source": "left", "target": "end"},
+            {"id": "right-end", "source": "right", "target": "end"},
+        ],
         "global_variables": [],
     }
     client = TestClient(app)
-    assert client.post("/api/workflow-drafts", json=isolated).status_code == 200
-
-    isolated["name"] = "merged"
-    isolated["edges"] = [
-        {"id": "left-end", "source": "left", "target": "end"},
-        {"id": "right-end", "source": "right", "target": "end"},
-    ]
     merged = client.post("/api/workflow-drafts", json=isolated)
     assert merged.status_code == 422
     assert "变量名冲突: same" in merged.text
@@ -240,16 +362,6 @@ def test_isolated_branches_may_reuse_output_name_until_they_merge(tmp_path, monk
 def test_variable_groups_skip_ancestors_without_output_mappings(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     body = _graph_body()
-    start = {
-        "id": "start",
-        "type": "workflowNode",
-        "position": {"x": 0, "y": 0},
-        "data": {"nodeType": "START", "label": "开始", "outputVariables": []},
-    }
-    body["nodes"].insert(0, start)
-    body["edges"] = [
-        {"id": "start-llm", "source": "start", "target": "llm-1"}
-    ]
     client = TestClient(app)
     workflow = client.post("/api/workflow-drafts", json=body).json()["workflow"]
 

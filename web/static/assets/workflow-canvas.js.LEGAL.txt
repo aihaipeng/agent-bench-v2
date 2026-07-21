@@ -109,6 +109,7 @@ lucide-react/dist/esm/icons/search.js:
 lucide-react/dist/esm/icons/settings-2.js:
 lucide-react/dist/esm/icons/sliders-horizontal.js:
 lucide-react/dist/esm/icons/sparkles.js:
+lucide-react/dist/esm/icons/square.js:
 lucide-react/dist/esm/icons/trash-2.js:
 lucide-react/dist/esm/icons/undo-2.js:
 lucide-react/dist/esm/icons/upload.js:
