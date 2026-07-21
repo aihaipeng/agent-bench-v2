@@ -32,7 +32,7 @@ from execution.workflow_drafts import (
     WorkflowDraftRepositoryError,
     WorkflowNodeRunRecord,
     WorkflowNodeRunStatus,
-    validate_complete_workflow_graph,
+    validate_workflow_graph,
 )
 from execution.llm_node_execution import (
     LlmNodeConfigurationError,
@@ -72,7 +72,7 @@ __all__ = [
     "WorkflowDraftRepositoryError",
     "WorkflowNodeRunRecord",
     "WorkflowNodeRunStatus",
-    "validate_complete_workflow_graph",
+    "validate_workflow_graph",
     "LlmNodeConfigurationError",
     "redact_sensitive_text",
     "resolve_prompt_template",

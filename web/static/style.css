@@ -1398,7 +1398,7 @@ body {
     border-radius: var(--radius);
     color: #fff;
     font-size: 13px;
-    z-index: 1000;
+    z-index: 3000;
     transition: opacity 0.3s;
 }
 

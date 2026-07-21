@@ -37,7 +37,7 @@ from execution import (
     extract_output_variables,
     node_output_mappings,
     resolve_templates,
-    validate_complete_workflow_graph,
+    validate_workflow_graph,
 )
 
 
@@ -177,7 +177,7 @@ def get_workflow_or_404(workflow_id: str) -> WorkflowDraftRecord:
 
 def _validate_complete_graph(workflow: WorkflowDraftConfiguration) -> None:
     try:
-        validate_complete_workflow_graph(workflow.nodes, workflow.edges)
+        validate_workflow_graph(workflow.nodes, workflow.edges)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

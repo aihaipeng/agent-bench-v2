@@ -1356,6 +1356,74 @@ T13.2.1-T13.2.6 已完成
 - 浏览器验收：使用仅含一个 LLM、完全没有 `START / END` 的临时 Workflow，选择 DeepSeek 并填写提示词后从编辑器右上角启动；节点立即进入 `RUNNING`，运行按钮禁用、中断按钮启用，最终在 `15.5s` 进入 `SUCCESS`。临时 Workflow 随后删除。
 - 发布回归：前端资源升级为 `v=30`；全量 `uv run pytest -q` 结果 `185 passed, 6 skipped, 1 warning in 18.53s`，JS/Python 静态检查和 `git diff --check` 通过。
 
+#### Step 16：弱化 START/END 并完善画布图编辑（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- 当前 START/END 只承担装饰性连线作用，却被错误地作为 Workflow 保存和运行的硬性前置条件；这会让单节点和多入口/多出口 DAG 增加无意义的配置成本。
+- 目标是让调度器根据真实连线自动识别起点和终点，同时保留用户在需要时手工添加 START/END 的能力，并让连线删除、游离提示可见且可操作。
+
+##### 用户与真实场景（Who / Where）
+
+- 用户：在 Workflow Studio 中快速验证单节点、编排并行分支和维护已有流程的测试工程师。
+- 场景：用户可以直接运行一个孤立的当前节点；画布运行前需要知道哪些节点未接入图；编辑连线时需要点击选中后用 Delete/Backspace 或右键删除。
+
+##### 已确认范围与优先级（What / When）
+
+- 不再强制要求 START/END；入度为 0 的节点自动作为执行起点，出度为 0 的节点自动作为终点。
+- 右键画布可添加 `START` 和 `END`，系统节点与业务节点均可按需使用。
+- 连线支持选中高亮、Delete/Backspace 删除和右键菜单删除。
+- 保存或运行检测到游离节点时必须显示明确提示，不能静默阻止。
+
+##### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 16.1 | 新图规则与提示 | 可选 START/END、游离节点错误 | 后端/前端合法单节点、并行 DAG、孤立节点、保存/运行错误 | 无 |
+| 16.2 | 连线编辑交互 | 选中/高亮/删除/右键删除 | 浏览器点击连线、键盘删除、右键删除 | 16.1 |
+| 16.3 | 系统节点添加 | 画布右键 START/END | 浏览器菜单添加并持久化 | 16.1 |
+| 16.4 | 集成回归与发布 | Workflow Studio 完整流程 | 全量测试、构建、真实浏览器、推送 | 16.1-16.3 |
+
+##### 验收标准与价值验证（How to Measure）
+
+- 单节点和不含 START/END 的合法 DAG 可以保存和运行。
+- 完全无连线的业务节点被识别为游离节点；保存和运行均显示包含节点名称的提示。
+- 连线点击后有选中高亮；Delete、Backspace 和右键“删除”均能移除连线并更新图。
+- 画布右键菜单可添加 START/END，新增节点可继续连线、保存和参与 DAG 调度。
+
+##### 16.1 新图规则与提示（completed，2026-07-22）
+
+- START/END 可选：后端和前端均不再要求 START/END 存在或唯一；调度器继续把所有入度为 0 的节点视为起点，把所有出度为 0 的节点视为终点。
+- 新建默认图：删除装饰性 START/END，只保留 `HTTP → AGENT → (LLM / SCRIPT)` 业务节点和真实依赖。
+- 游离定义：单节点 Workflow 合法；多节点时，入度与出度总和均为 0 的节点视为游离。多个彼此独立但内部有连线的分支可并行存在。
+- DAG 安全：前后端增加 Kahn 拓扑检测，发现循环依赖时显示涉及节点并拒绝保存/画布运行。
+- 可见提示：全局 Toast 层级从 `1000` 提升到 `3000`，高于全屏 Workflow Studio 的 `2000`，保存和运行错误不再被画布遮挡。
+- 验证：`uv run pytest tests/test_workflow_drafts.py tests/test_execution_frontend.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py -q` 结果 `37 passed, 1 warning`；覆盖单节点、并行 DAG、游离节点、循环依赖、单节点调试和现有中断协议。
+- 依赖结论：图规则与提示边界已通过，可以进入连线选中/删除和系统节点菜单的真实浏览器验收。
+
+##### 16.2 连线编辑交互（completed，2026-07-22）
+
+- 选中高亮：连线点击后独占选中，节点选择被清空；真实浏览器计算样式从中性灰 `rgb(154, 168, 186) / 1.7px` 变为蓝色 `rgb(36, 87, 214) / 2px`。
+- 键盘删除：Workflow Studio 在连线点击时主动获得焦点；Delete/Backspace 同时支持选中节点和选中连线。浏览器实测 Delete 后连线数从 3 降到 2。
+- 右键删除：新增 `onEdgeContextMenu` 和独立 `edge-context-menu`，右键连线会选中该线并显示“删除连线”；删除共用统一历史记录逻辑，支持 Ctrl+Z 恢复。
+- 依赖结论：连线已具备可见选中、键盘删除和右键删除三条完整交互路径，可以进入系统节点菜单验收。
+
+##### 16.3 系统节点添加与可见错误（completed，2026-07-22）
+
+- 画布菜单：右键空白区展开“添加节点”后显示 `开始 START / 结束 END / HTTP / AGENT / LLM / SCRIPT`；Edge `+` 插入仍只提供四种业务节点，避免把 START/END 插入流程中段。
+- 浏览器添加：分别点击 START 和 END 菜单项后，对应系统节点真实出现在画布；节点继续使用既有单向 Handle 规则。
+- 游离提示：删除默认 AGENT 后，保存和画布运行均显示 `Workflow 存在游离节点`；运行未启动计时器。Toast 的 `z-index: 3000` 确保提示位于全屏画布和编辑器之上。
+- 无系统节点保存：默认 `HTTP → AGENT → (LLM / SCRIPT)` 图不含 START/END，浏览器实测保存成功；临时 Workflow 删除后 API 仅保留用户原有数据。
+- 依赖结论：系统节点可选入口、游离提示和无 START/END 保存均已通过真实浏览器验收，可以进入全量集成回归。
+
+##### 16.4 集成回归与发布（completed，2026-07-22）
+
+- 专项回归：Workflow 草稿、前端契约、四类节点运行、LLM 阻塞/流式和中断专项合计 `37 passed, 1 warning`。
+- 全量回归：`uv run pytest -q` 结果 `185 passed, 6 skipped, 1 warning in 17.93s`；6 项跳过仍是未向本轮进程注入真实供应商环境变量的 live 用例。
+- 构建检查：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`uv run python -m compileall -q execution web tests` 和 `git diff --check` 全部通过。
+- 发布资源：Workflow JS/CSS 资源版本升级为 `v=31`；`AGENTS.md` 同步记录 START/END 可选、隐式起止、连线编辑、游离/循环校验和单节点运行边界。
+- 测试数据：浏览器 E2E 创建的无 START/END 临时 Workflow 已删除，API 仅保留用户原有 Workflow。
+
 ## 22. 待优化项目
 
 ### 22.1 独立凭据仓储与绑定
