@@ -7,6 +7,7 @@ from execution.targets import (
     TargetRecord,
     TargetRepository,
     TargetRepositoryError,
+    utc_now_iso,
 )
 from execution.model_providers import (
     ModelProviderConfiguration,
@@ -15,6 +16,40 @@ from execution.model_providers import (
     ModelProviderRepository,
     ModelProviderRepositoryError,
     ModelProviderSummary,
+)
+from execution.model_gateway import (
+    build_chat_completion_request,
+    chat_completions_url,
+    deep_merge_model_request,
+    invoke_openai_compatible,
+    parse_openai_compatible_response,
+)
+from execution.workflow_drafts import (
+    NODE_RUN_HISTORY_LIMIT,
+    WorkflowDraftConfiguration,
+    WorkflowDraftRecord,
+    WorkflowDraftRepository,
+    WorkflowDraftRepositoryError,
+    WorkflowNodeRunRecord,
+    WorkflowNodeRunStatus,
+    validate_complete_workflow_graph,
+)
+from execution.llm_node_execution import (
+    LlmNodeConfigurationError,
+    redact_sensitive_text,
+    resolve_prompt_template,
+    workflow_variables,
+)
+from execution.workflow_variables import (
+    OUTPUT_VARIABLE_TYPES,
+    WorkflowVariableError,
+    ancestor_node_ids,
+    convert_output_value,
+    extract_output_variables,
+    extract_path_expression,
+    node_output_mappings,
+    resolve_templates,
+    validate_visible_variable_names,
 )
 
 __all__ = [
@@ -25,9 +60,36 @@ __all__ = [
     "ModelProviderRepository",
     "ModelProviderRepositoryError",
     "ModelProviderSummary",
+    "build_chat_completion_request",
+    "chat_completions_url",
+    "deep_merge_model_request",
+    "invoke_openai_compatible",
+    "parse_openai_compatible_response",
+    "NODE_RUN_HISTORY_LIMIT",
+    "WorkflowDraftConfiguration",
+    "WorkflowDraftRecord",
+    "WorkflowDraftRepository",
+    "WorkflowDraftRepositoryError",
+    "WorkflowNodeRunRecord",
+    "WorkflowNodeRunStatus",
+    "validate_complete_workflow_graph",
+    "LlmNodeConfigurationError",
+    "redact_sensitive_text",
+    "resolve_prompt_template",
+    "workflow_variables",
+    "OUTPUT_VARIABLE_TYPES",
+    "WorkflowVariableError",
+    "ancestor_node_ids",
+    "convert_output_value",
+    "extract_output_variables",
+    "extract_path_expression",
+    "node_output_mappings",
+    "resolve_templates",
+    "validate_visible_variable_names",
     "TargetConfiguration",
     "TargetHttpMethod",
     "TargetRecord",
     "TargetRepository",
     "TargetRepositoryError",
+    "utc_now_iso",
 ]

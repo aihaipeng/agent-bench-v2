@@ -309,8 +309,6 @@ document.querySelector('.sidebar-nav').addEventListener('click', function (e) {
         viewTargets();
     } else if (view === 'models') {
         viewModelProviders();
-    } else if (view === 'tools') {
-        viewToolTemplates();
     } else if (view === 'workflows') {
         viewWorkflows();
     } else if (view === 'faq') {

@@ -1,6 +1,6 @@
-# Workflow Studio 工具模板化与执行协议计划（T13.2）
+# Workflow Studio 节点内聚与执行协议计划（T13.2）
 
-> 状态：T13.1 前端高保真原型和回归已完成；T13.2 不可兼容重构进行中。旧工具数据和旧 Workflow/Run 链路已删除，四类大写工具模板模型、目录仓储、CRUD/ZIP API、工具模板前端、独立执行、画布深拷贝和发布模板已完成；新版 Workflow 持久化协议尚待确认和实现。
+> 状态：T13.1 前端高保真原型和回归已完成；T13.2 Step 11 已完成验收并推送到 GitHub。按最新业务决策，工具管理/工具模板体系及所有画布耦合已彻底删除，工具节点完全在 Workflow 中定义；LLM 节点已接入模型管理引用、任意 JSON 高级参数和框架无关的 OpenAI-compatible 网关内核。新版 Workflow 持久化与 DAG 真实执行 API 仍尚待单独确认和实现。
 >
 > 更新时间：2026-07-20
 >
@@ -896,6 +896,456 @@ T13.2.1-T13.2.6 已完成
 - 最终价值验证：用户可以从一级导航集中管理供应商连接，通过 API Key + BASE_URL 自动发现模型或手工添加，保存多个模型并在重启后继续编辑；列表不暴露密钥，编辑页按明确选择完整回显。
 - 已知风险：API Key 当前按用户选择在本机 SQLite 明文保存并在编辑页完整回显；任何能访问该本机 Web 页或数据库的用户都可读取。凭据加密、绑定和脱敏仍属于第 22.1 节待优化项。
 - 结论：Step 10 全部验收通过，可以提交并推送当前分支。
+
+### Step 11：Workflow 工具内聚与 LLM 模型参数（completed，2026-07-21）
+
+#### 最新业务方向（Why / Who & Where）
+
+- 用户明确提出删除工具管理页面与耦合逻辑，工具节点只在 Workflow 中创建、编辑和保存；此前“工具模板库作为起点、画布发布回模板”的方向被本节最新决策取代。
+- Workflow / Agent 作者从模型管理维护供应商连接与模型清单，在 LLM 节点中引用已有模型，不重复填写 API Key 或 BASE_URL。
+- LLM 节点的模型选择 UI 参考用户提供的 Dify 截图：顶部搜索、供应商分组折叠、供应商连接状态、模型单选和当前项勾选。
+- LLM 节点需要允许用户自行添加高级参数；Header/Body Override 仍属于模型连接层后续能力，不与本批节点参数混为一谈。
+
+#### 行业调研：高级参数与默认值
+
+- Dify 使用供应商/具体模型下发的 `parameter_rules` 动态生成控件，可选参数通过开关决定是否写入；SDK 通用模板为 Temperature `0`、Top P `1`、Presence/Frequency Penalty `0`、Max Tokens `64`，但具体模型可覆盖，例如 `gpt-4o-mini` 把 Max Tokens 改为 `512`，`gpt-5` 则去掉常规采样参数并增加 Reasoning Effort `medium`、Verbosity `medium`、Streaming `true`、Service Tier `auto`。
+- n8n 的 OpenAI Chat Model 使用固定 Options 集合：Temperature `0.7`、Top P `1`、Presence/Frequency Penalty `0`、Max Tokens `-1`（不限制）、Timeout `60000ms`、Max Retries `2`、Response Format `text`。
+- Langflow OpenAI 组件默认 Temperature `0.1`、Seed `1`、Max Retries `5`、Timeout `700s`，Max Tokens 未设置时传 `None`；同时提供任意 `model_kwargs` 字典作为供应商扩展逃生口。统一 Language Model 组件只保留 Temperature `0.1`、Stream `false` 和可选 Max Tokens。
+- Flowise OpenAI Chat 默认 Temperature `0.9`、Streaming `true`；Max Tokens、Top P、Presence/Frequency Penalty、Timeout 和 Stop Sequence 都是可选且不设置默认值。
+- 结论：不存在可靠的跨供应商默认参数。Agent Bench 若强行写入平台默认值，会覆盖供应商或具体模型默认行为；当前最稳妥策略是节点默认不发送高级参数，用户显式添加后才持久化和发送。
+
+#### 调研来源
+
+- Dify SDK 参数模板：<https://github.com/langgenius/dify-plugin-sdks/blob/main/src/dify_plugin/entities/model/schema.py>
+- Dify `gpt-4o-mini` 与 `gpt-5` 模型 Schema：<https://github.com/langgenius/dify-official-plugins/tree/main/models/openai/models/llm>
+- n8n OpenAI Chat Model：<https://github.com/n8n-io/n8n/blob/master/packages/@n8n/nodes-langchain/nodes/llms/LMChatOpenAi/LmChatOpenAi.node.ts>
+- Langflow OpenAI / Language Model：<https://github.com/langflow-ai/langflow/tree/main/src/lfx/src/lfx/components>
+- Flowise ChatOpenAI：<https://github.com/FlowiseAI/Flowise/blob/main/packages/components/nodes/chatmodels/ChatOpenAI/ChatOpenAI.ts>
+
+#### 专有参数透传补充调研
+
+- `model_kwargs` 是 LangChain 构造参数，不是供应商协议。当前 `ChatOpenAI` 会把 `model_kwargs` 展开为 OpenAI SDK 的顶层调用参数；SDK 未声明的千问/DeepSeek 扩展字段可能直接触发 `TypeError`，通常必须通过 `extra_body` 才能进入 HTTP Body。
+- 当前 `ChatAnthropic` 对 `thinking` 和 `output_config` 有显式字段，也会把 `model_kwargs` 合并进请求 payload，但这仍是框架实现细节，不适合作为 Workflow 持久化契约。
+- Open WebUI 使用“默认不设置”的标准参数，并在自定义模型管理中提供 `custom_params`；Dify 使用具体模型 Schema 白名单；n8n/Flowise 使用固定 Options；Langflow 使用 `model_kwargs`/`model_kwargs` 字典作为逃生口。它们共同说明 UI 数据应与具体 SDK 解耦。
+- Agent Bench 节点字段统一命名为 `modelParameters`：保存原始 JSON 对象。OpenAI-compatible 直连时合并到请求 Body；使用 OpenAI SDK 的用户代码可将其传给 `extra_body`；Anthropic 已知字段可直接展开，未知网关字段可走 SDK 的 `extra_body`。不得把持久化字段命名为 `model_kwargs`。
+- 千问 `enable_thinking / thinking_budget`、DeepSeek `thinking / reasoning_effort`、Anthropic `thinking / output_config` 都可以由该 JSON 数据结构表达；最终能否生效仍由所选供应商、模型和协议端点决定，平台不伪造兼容保证。
+
+#### 已确认决策（1A / 2B / 3A）
+
+- 彻底删除工具模板仓储、CRUD/ZIP/独立运行 API、左侧工具模板页面、画布模板面板、深拷贝和发布入口；不保留隐藏后台兼容。通用 Worker、进程中断和运行流内核保留，供后续 Workflow 节点执行复用。
+- LLM 高级参数只提供一个任意 JSON 对象编辑器，不提供 Temperature 等固定快捷控件；默认值为 `{}`，平台不主动向供应商发送任何高级参数。
+- Token 消耗默认无平台上限：基础请求不发送 `max_tokens` 或 `max_completion_tokens`，由供应商和模型自身上限处理；用户需要限制时可在节点 `modelParameters` 中显式添加。
+- LLM 节点只保存 `provider_id + model_name` 和节点自己的高级参数，不复制 API Key、BASE_URL 或完整供应商记录。供应商或模型被删除后，节点显示“模型已失效”并要求重新选择。
+- 模型选择器采用用户截图结构：顶部搜索、供应商分组折叠、绿色连接状态、模型单选和当前模型勾选。
+- 最新确认采用模型网关式 Body 合并：基础请求、模型级默认参数和节点 `modelParameters` 递归合并，越靠近节点的值优先；数组和非对象值整体替换。
+- 用户选择 `1B / 2A`：节点参数可以覆盖包括 `model`、`messages`、`stream` 在内的全部基础请求字段；嵌套对象递归合并，不设置保留字段白名单。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 输入 | 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|---|
+| Step 11.1 | 删除工具模板后端和页面 | 1A；现有模板仓储/API/UI | 模板文件、路由、导航、ZIP/运行测试全部删除；通用 Worker 保留 | `/api/tool-templates` 与静态资产 404；生产源码零引用；Worker 专项通过 | 无 |
+| Step 11.2 | 删除画布模板耦合 | Step 11.1；当前 React Flow Studio | 顶部模板面板、加载/深拷贝、发布菜单与 API 调用删除；四类空白节点保留 | 前端源码断言、构建、Studio 基线回归 | Step 11.1 |
+| Step 11.3 | LLM 模型引用与高级 JSON | 模型管理列表 API；2B/3A；用户 UI 参考 | 分组模型选择器、失效态、`providerId/modelName/modelParameters` 节点状态 | 模型列表加载、搜索/折叠/选择、JSON 校验、删除后失效测试 | Step 11.2 |
+| Step 11.4 | 集成验收与发布 | 完成的清理和 LLM 编辑器 | E2E、全量回归、计划收口和 GitHub 提交 | 1440x900 浏览器 E2E、构建、静态检查、全量 pytest、密钥扫描 | Step 11.1-11.3 |
+
+#### Step 11.1：删除工具模板后端和一级页面（completed）
+
+- 删除范围：删除模板 Pydantic/目录仓储、ZIP 归档、CRUD/刷新/导入导出/发布/独立运行 API、模板运行适配器、左侧页面与脚本、迁移脚本、`tool_registry/` 占位和全部模板专项测试；不保留隐藏 API 兼容。
+- 保留范围：保留 `tool_runtime.py / tool_worker.py / run_stream.py` 作为 Workflow 节点通用子进程、HTTP、进程中断和 SSE 流内核；模块文案已去除“模板”语义。
+- 内核测试重写：`test_tool_execution.py` 不再构造 ToolTemplate，直接发送通用 Worker payload；继续覆盖 Python `inputs/config/response`、无换行 flush、NaN/Infinity、超时、中断和真实 HTTP 请求。
+- 页面与文档：删除左侧“工具模板”、`tool-templates.js` 静态路由和专属 CSS；README 与 `.gitignore` 删除 `tool_registry` 说明和规则。
+- 专项验证：`uv run pytest tests/test_tool_execution.py tests/test_run_stream.py tests/test_tool_removal.py tests/test_web_app.py -q` 结果 `13 passed, 1 warning`；Python 编译和 `git diff --check` 通过。
+- 零引用验证：除下一步待处理的 React Flow 画布源码/CSS 和构建产物外，`web/ execution/ README.md / .gitignore` 对 `tool-template / ToolTemplate / tool_registry / viewToolTemplates` 零命中。
+- 依赖结论：Step 11.1 已完成，可以开始 Step 11.2 画布模板耦合删除。
+
+#### Step 11.2：删除画布模板耦合（completed）
+
+- 删除范围：React Flow Studio 顶部“工具模板”入口、模板加载状态和 `/api/tool-templates` 请求、模板深拷贝、发布方法、右键“发布为工具模板”操作及全部专属样式均已删除。
+- 保留范围：`HTTP / AGENT / LLM / SCRIPT` 四类空白节点的新增、编辑、复制、连线、状态演示和历史操作继续保留。
+- 构建验证：`npm run build` 成功，重新生成 `workflow-canvas.js / workflow-canvas.css`，`node --check web/static/assets/workflow-canvas.js` 通过。
+- 专项验证：`uv run pytest tests/test_execution_frontend.py tests/test_tool_removal.py -q` 结果 `10 passed, 1 warning`；`git diff --check` 通过。
+- 零引用验证：`web/ execution/ README.md / .gitignore` 以及生成资源对工具模板标识和显示文案零命中。
+- 依赖结论：Step 11.2 已完成，可以开始 Step 11.3 LLM 模型引用、任意 JSON 参数和网关式递归合并。
+
+#### Step 11.3：LLM 模型引用、高级 JSON 与网关合并（completed）
+
+- 网关内核：新增与 LangChain 解耦的 OpenAI-compatible 请求组装与 HTTP 传输；合并顺序为“基础请求 → 模型默认参数 → 节点 `modelParameters`”，后层优先，对象递归合并，数组和标量整体替换。
+- Token 默认：基础请求不包含 `max_tokens` 或 `max_completion_tokens`，Agent Bench 默认不限制 token 消耗；节点显式填写时仍按普通高级参数合并并透传。
+- 覆盖边界：按已确认的 `1B / 2A`，节点参数可覆盖 `model`、`messages`、`stream` 及任意其他 Body 字段，平台不维护保留字段白名单，也不翻译供应商专有参数。
+- 节点状态：LLM 节点只保存 `providerId / modelName / modelParameters`；API Key、BASE_URL 和供应商完整记录仍由模型管理持有，不进入 Workflow 节点状态。高级参数默认为空对象 `{}`。
+- 选择器 UI：接入不含密钥的 `/api/model-providers` 列表，实现供应商分组、搜索、折叠、连接状态、当前模型勾选和刷新；供应商或模型删除后显示“模型已失效”并禁用节点保存/运行。
+- JSON 编辑：使用任意 JSON 对象编辑器；非法 JSON 或顶层非对象时显示明确错误并禁用保存/运行，修复为合法对象后即恢复。
+- 自动化验证：`uv run pytest tests/test_model_gateway.py tests/test_execution_frontend.py tests/test_tool_removal.py -q` 结果 `25 passed, 1 warning`；`npm run build`、生成 bundle 的 `node --check` 和 `git diff --check` 全部通过。
+- 真实浏览器 E2E：在 `1440x900` 下验证 DeepSeek 选择、搜索过滤、当前项选中、供应商折叠、非法/合法 JSON 切换和无裁切重叠；通过创建临时供应商、选择、删除并刷新，实测“模型已失效”与禁用状态，临时数据已清理。
+- 范围约束：新网关内核已可独立真实调用，但新 Workflow Studio 仍是前端本地状态和演示运行，本步没有实现 Workflow 持久化或 DAG 真实执行 API，不得宣称画布端到端模型执行已完成。
+- 真实模型验证：新增受 `live` marker 控制的网关集成测试，固定覆盖千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro`；未注入环境变量时安全跳过，不影响公开回归。为验证稳定性，每个模型顺序执行两轮真实请求。
+- 真实业务场景：测试使用企业客服 Agent 合规评测，输入用户退款问题、三条明确策略以及一段“未授权即宣称退款完成，并索取身份证、银行卡和验证码”的高风险回复；要求模型输出包含 `passed / score / summary / issues / recommendation` 的严格 JSON。
+- 真实调用结果：使用用户提供的两家凭据仅在 pytest 进程内执行 `uv run pytest tests/test_model_gateway.py tests/test_model_gateway_live.py -m live -q`，结果 `4 passed, 4 deselected in 25.22s`。千问和 DeepSeek 各两轮均返回可解析且字段完整的 JSON，均稳定判定该 Agent 回复不通过并输出具体问题和改进建议。
+- 覆盖价值：live 请求故意在基础层放入错误模型、错误消息和 `stream: true`，再由节点参数覆盖为真实模型、完整的 system/user 业务消息和 `stream: false`；模型默认层的 `response_format: {"type": "json_object"}` 被保留，千问同时直透 `enable_thinking: false`。四次请求均明确断言不存在 `max_tokens / max_completion_tokens`。
+- 密钥边界：API Key 未写入测试、文档、代码、命令输出或 Git 跟踪文件；DeepSeek 密钥从本机模型仓储读入子进程，千问密钥只注入单次 pytest 进程。
+- 依赖结论：Step 11.3 及两家真实模型验证已完成，可以进入 Step 11.4 全量回归与发布。
+
+#### Step 11.4：集成验收与发布（completed）
+
+- 业务验收：工具管理一级页面、仓储、CRUD/ZIP/独立运行 API、画布模板面板、深拷贝和发布入口均已删除；`HTTP / AGENT / LLM / SCRIPT` 节点继续由 Workflow Studio 直接创建和编辑。
+- LLM 交互验收：`1440x900` 真实浏览器覆盖模型列表加载、搜索、供应商折叠、当前项勾选、DeepSeek 选择、非法/合法高级 JSON、删除供应商后的失效态和禁用操作；截图无裁切、重叠或文本越界。
+- 真实模型回归：千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 各连续两轮企业 Agent 合规评测，结果 `4 passed, 4 deselected in 25.22s`；全程不发送 token 上限，两家均稳定返回字段完整且业务判定正确的结构化 JSON。
+- 全量回归：`uv run pytest -q` 结果 `100 passed, 4 skipped, 1 warning in 11.47s`；4 个跳过项为默认未注入两家凭据时的两轮 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+- 构建与静态检查：`npm run build` 成功生成 Workflow JS/CSS bundle；`execution/` 和 `web/` Python `compileall`、`app.js / model-providers.js / execution.js / workflow-canvas.js` 的 `node --check`、`git diff --check` 全部通过。
+- 清理与安全：生产源码对 `tool-template / ToolTemplate / tool_registry / viewToolTemplates` 零引用；Git 跟踪及待提交文件中的真实 `sk-` 凭据形态扫描为 0；失效引用 E2E 临时供应商已删除。
+- 已知边界：模型网关的请求组装、递归合并和真实 HTTP 传输已验证；画布仍为前端本地草稿与演示运行，尚未把该网关接入 Workflow 持久化和 DAG 执行后端，因此不宣称 Workflow 端到端真实 LLM 执行已完成。
+- 价值结论：Workflow 作者可在 LLM 节点引用已管理模型，使用任意 JSON 直透国内外供应商参数，节点优先覆盖模型默认值，并在默认情况下不受 Agent Bench token 上限限制。
+- GitHub 发布：主体改造提交为 `8e8b072`（`Remove tool templates and add model gateway`），已推送到 `origin/codex/tool-template-refactor`。
+
+### Step 12：LLM 真实执行、持久化日志与编辑器收敛（in progress，2026-07-21）
+
+#### 业务背景与目标（Why）
+
+- LLM 节点已能选择模型和编辑高级参数，但当前仍存在不属于网关执行器的 Python“代码”页签、与日志重复的独立“参数”页签，且运行仍是 900ms 前端演示，无法支持真实调试。
+- 本阶段目标是让 Workflow 作者在 LLM 节点内完成真实模型验证，并在页面刷新后仍能追溯该节点最近 10 次的输入、输出和错误。
+
+#### 用户与真实场景（Who & Where）
+
+- Workflow / Agent 作者在画布双击 LLM 节点，选择已管理模型，填写可选系统提示词和用户提示词模板，可在模板中以 `${变量名}` 引用 Workflow 变量。
+- 作者可在系统提示词为空、高级参数为 `{}` 时直接运行节点；用户提示词解析后必须非空，未解析变量必须在发起供应商请求前失败。
+- 作者切换到“日志”后，先扫描月日时间、终态、耗时和最终结果摘要，再按需展开某次运行查看完整输入快照、无密钥请求、输出、usage、HTTP 元数据或错误堆栈。
+
+#### 已确认规则与优先级（What & When）
+
+- `1A`：LLM 编辑器删除“代码”和独立“参数”页签，只保留“设置 / 日志”；原参数快照合并到每次日志详情。AGENT / SCRIPT 的代码能力不受影响。
+- `2A`：系统提示词和用户提示词放在设置页模型选择之后，系统提示词选填；用户提示词支持 `${变量名}`，单节点验证时从 Workflow 全局变量解析。
+- `3B`：Workflow 草稿、节点 ID 和运行日志保存到本机 SQLite，浏览器刷新后可恢复；每个 Workflow 节点只保留最近 10 次尝试，成功和失败都计入，第 11 次完成后删除最旧记录。
+- 日志最新确认 `1A`：执行器仍解析模型输出供节点结果和下游使用，但日志展开区不对供应商响应做结构化拆分，只原样打印完整 HTTP Body/SSE；失败时原样打印已脱敏错误与 traceback。
+- 变量祖先规则 `1A`：“之前节点”以画布边反向可达的所有祖先节点为准，与画布 x/y 位置无关；未连接到当前节点的分支变量不可见。
+- 原生数据契约：阻塞执行的 `request` 是节点实际发出的原生请求数据，`response` 是节点收到的原生响应数据，平台不注入固定 `body / output / usage` 包装字段。输出变量从这两个根对象提取，例如 `request.messages[0].content` 或 `response.usage[total_tokens]`。
+- 提取语法：所有 `HTTP / LLM / AGENT / SCRIPT` 节点统一使用受限 Python 风格路径；支持点访问、整数数组下标和字符串字典键，`response.usage["total_tokens"]`、`response.usage['total_tokens']`、`response.usage[total_tokens]` 等价。禁止函数调用、运算、切片及任意代码执行，路径缺失时节点失败并报告完整表达式。
+- 列表过滤：支持 `response.data[id==3]`、`response.data[status=="PASSED"].result` 和嵌套条件 `response.data[meta.id==3].name`；条件只支持 `==` 与标量值。过滤结果必须唯一，0 条或多条均失败，不静默取第一条。
+- 流式边界 `1A`：流式模式只实时展示并持久化供应商原始 SSE，不解析流式响应、不构造可提取的 `response`、不生成输出变量；页面隐藏输出变量配置但保留草稿值，切回默认阻塞模式后恢复。
+- 变量冲突规则 `3A`：全局变量、当前节点输出变量及当前节点全部祖先输出变量在可见范围内禁止同名；草稿保存时直接拒绝并指明冲突节点。不会汇合到同一下游的隔离分支可以使用相同名称。
+- 变量面板：每个节点编辑器右上角增加变量按钮，按“全局变量 → 祖先节点 → 当前节点”分组显示变量名和最近成功运行值；未产生值时显示空值状态。
+- 参数替换：`${变量名}` 扩展到节点所有字符串参数，字符串值原样替换，对象/数组以 JSON 序列化后嵌入；缺失变量在执行前失败并记录日志。当前阶段首先在已具备真实执行器的 LLM 节点验证，其他节点仍不伪造真实执行结果。
+- 提示词交互：用户直接键入 `${变量名}`；删除用户提示词旁的“插入变量”下拉框，节点右上角变量查看按钮继续用于核对可见变量和值。
+- 日志安全：API Key、Authorization 和完整供应商记录不得进入 Workflow 草稿或运行日志；日志中的请求 Body 仅包含实际模型请求字段。
+- Token 规则不变：平台默认不发送 `max_tokens / max_completion_tokens`，真实节点运行不增加隐式 token 上限。
+- 本阶段只建立 Workflow Studio 草稿与 LLM 单节点运行协议，不自行补全 DAG 调度、分支/汇合、失败传播或其他节点的真实执行语义。
+
+#### 验收标准与价值验证（How to Measure）
+
+- LLM 编辑器只显示“设置 / 日志”；设置页依次显示模型、系统提示词、用户提示词、高级参数、运行配置和输出变量，在 `1440x900` 桌面视口无遮挡、重叠或文本越界。
+- 有效模型 + 非空用户提示词在空系统提示词和 `{}` 高级参数下可真实运行；`${变量名}` 正确替换，缺失变量产生可追溯的 `FAILED` 记录且不请求供应商。
+- 日志折叠栏显示 `MM-DD HH:mm:ss`、`PASSED / FAILED`、耗时和最终结果摘要；展开后能看到完整输入、请求、执行事件、输出、usage 或错误。
+- 同一节点制造 11 次运行后 API 和页面均只返回最新 10 次；重启 Repository、刷新页面和重新打开 Workflow 后记录不丢失。
+- 千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 需要用真实业务提示词完成节点 API 和页面回读验证；不使用短 token 限制或仅回固定字符串的形式化测试。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 输入 | 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|---|
+| Step 12.1 | 草稿与日志持久化 | 当前 React Flow 节点/边；3B | SQLite Workflow draft + node run repository、CRUD/日志 API | Repository 重启回读、11 留 10、级联删除、API 严格校验 | 无 |
+| Step 12.2 | 真实 LLM 单节点执行 | Step 12.1；模型管理；`${变量名}` | 变量解析、网关请求、非流式/流式响应解析、PASSED/FAILED 持久化日志 | Stub 真实 HTTP、缺变量无上游请求、错误/输出/usage、无密钥 | Step 12.1 |
+| Step 12.3 | LLM 布局与前后端联调 | Step 12.1-12.2；1A/2A/3B | 两页签编辑器、草稿保存/恢复、真实运行、10 条可展开日志 | 前端契约、构建、`1440x900` 浏览器 E2E、刷新回读 | Step 12.1-12.2 |
+| Step 12.4 | 真实模型、全量回归与发布 | 完成的 LLM 单节点链路 | 千问/DeepSeek 记录、计划收口、GitHub 提交 | live 业务场景、全量 pytest、构建、静态/密钥扫描 | Step 12.1-12.3 |
+
+#### Step 12.1：Workflow 草稿与节点日志持久化（completed）
+
+- 仓储：新增独立 `workflow_drafts / workflow_node_runs` SQLite 表和 `WorkflowDraftRepository`；草稿保存名称、说明、React Flow 节点/边及全局变量，不恢复旧 Workflow/Run 固定拓扑协议。
+- 图校验：节点和边 ID 必须非空且唯一，节点 `data` 必须为对象，边的 source/target 必须引用存在节点，Pydantic 继续拒绝未知顶层字段。
+- 运行记录：每条记录保存节点/模型身份、输入快照、无密钥请求 Body、事件、输出、usage、HTTP 元数据和结构化错误；终态写入与同节点裁剪在同一事务完成，最多保留 10 条。
+- API：新增 `/api/workflow-drafts` 列表/CRUD、单条读取和 `/{workflow_id}/nodes/{node_id}/runs` 日志列表；删除草稿时通过 SQLite 外键级联删除所有节点记录。
+- 验证：`uv run pytest tests/test_workflow_drafts.py tests/test_targets.py tests/test_model_providers.py -q` 结果 `48 passed, 1 warning in 9.52s`；覆盖 Repository 重启回读、11 次仅留最新 10 次、FAILED 记录、级联删除、完整 API CRUD 和非法图拒绝。Python 编译和 `git diff --check` 通过。
+- 依赖结论：Step 12.1 已通过，可以在该持久化契约上实现 Step 12.2 真实 LLM 单节点执行。
+
+#### Step 12.2：真实 LLM 单节点执行（completed）
+
+- 执行入口：`POST /api/workflow-drafts/{workflow_id}/nodes/{node_id}/runs` 只从已保存草稿读取 LLM 节点和全局变量，不接受客户端另外传入的模型、Prompt 或凭据，避免“页面配置”与“实际执行”两套事实。
+- 变量解析：用户提示词支持已确认的 `${变量名}`；字符串原样替换，其他 JSON 值序列化后替换。缺失变量、变量重名或解析后空 Prompt 都在请求供应商前失败，并持久化 `FAILED` 记录。
+- 真实请求：后端按 `providerId / modelName` 从本机模型管理获取 BASE_URL 和 API Key，系统提示词非空时才加入 messages，用户提示词必须存在，`modelParameters` 继续可覆盖任意 Body 字段。
+- 响应解析：新增 OpenAI-compatible 非流式 JSON 与缓冲 SSE `data:` 响应解析，支持合并 `content / reasoning_content`、usage 和 finish reason；没有任何隐式 `max_tokens / max_completion_tokens`。
+- 真实日志：运行开始即写入 `RUNNING`，最终更新为 `PASSED / FAILED`；记录变量解析、模型请求、HTTP 结果和输出事件，并保存输入快照、无密钥请求 Body、完整输出、usage、request ID 或结构化错误/堆栈。
+- 密钥保护：响应错误、异常和 traceback 写入前执行已知 API Key 值与 Bearer 字段脱敏；节点请求和 API 返回均不包含 Authorization。
+- Stub 验证：`uv run pytest tests/test_model_gateway.py tests/test_llm_node_runs.py tests/test_llm_node_runs_live.py tests/test_workflow_drafts.py -m 'not live' -q` 结果 `14 passed, 2 deselected, 1 warning in 1.64s`；覆盖真实本地 HTTP、空系统提示词/空高级参数、变量替换、usage/request ID、缺变量零上游请求、HTTP 429、密钥脱敏和 SSE 合并。
+- 真实模型验证：使用用户提供的千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 凭据仅在 pytest 进程内执行新节点 API，结果 `2 passed, 1 warning in 12.81s`。两家均以空系统提示词、`${agent_answer}` 真实业务变量和无 token 上限完成企业 Agent 合规评测，返回正确结构化结果并通过日志 API 完整回读。
+- 静态与安全验证：Python 编译、`git diff --check` 和待提交文件真实 `sk-` 形态扫描通过，密钥文件命中数为 0。
+- 依赖结论：Step 12.2 已通过，可以开始 Step 12.3 LLM 布局收敛、草稿恢复和真实日志前端。
+
+#### Step 12.2A：统一原生请求/响应提取规则（completed，2026-07-22）
+
+- 解析器：新增节点类型无关的受限 Python 风格路径解析器，只允许 `request / response` 根、点访问、字符串键和整数下标，不使用 `eval()`。
+- 字符串兼容：双引号、单引号和无引号标识符键等价；纯整数（含负数）保持数组下标语义，带引号的数字仍是字符串字典键。
+- 失败规则：未知根对象、函数调用、切片、非法键、缺失键、越界下标和不可继续访问的标量均明确失败，错误包含完整提取表达式。
+- 通用性验证：`uv run pytest tests/test_workflow_variables.py -q` 结果 `17 passed`；覆盖所有四类可执行节点共用同一 `extract_output_variables` 契约。
+- 依赖结论：统一解析器验证通过，下一项将 LLM 阻塞执行改为原生 `request / response`，并移除流式响应解析和流式输出变量。
+
+#### Step 12.2B：列表条件提取（completed，2026-07-22）
+
+- 语法：在统一路径解析器中加入安全过滤 token，支持数组元素字段、嵌套字段、数字/布尔/null/字符串比较和过滤后继续点访问。
+- 唯一性：`response.data[id==3]` 必须恰好匹配一条；空结果和重复结果均持久化为执行失败，错误报告表达式和匹配数量。
+- 验证：`uv run pytest tests/test_workflow_variables.py -q` 结果 `24 passed`，同时覆盖 `HTTP / LLM / AGENT / SCRIPT` 共用输出映射契约。
+- 依赖结论：列表过滤规则已确认并通过验证，可以接入 LLM 原生请求/响应运行契约。
+
+#### Step 12.2C：LLM 原生请求/响应与流式边界（completed，2026-07-22）
+
+- 阻塞执行：变量提取上下文改为实际发送的 `request_body` 和供应商成功响应 JSON；原始响应文本仅用于日志，不再伪装成 `response.body` 包装字段。
+- 流式执行：删除缓冲 SSE 的模型解析、usage/最终内容拼接和输出变量提取；运行记录的 `response_body`/`output` 均为脱敏后的完整原始 SSE，`output_variables` 为空。
+- 模式强制：阻塞端点固定发送 `stream: false`，流式端点固定发送 `stream: true`，避免高级 JSON 与端点模式不一致。
+- 变量面板：跳过没有输出变量的祖先节点，只保留全局变量、有输出变量的祖先和当前节点。
+- 验证：`uv run pytest tests/test_workflow_variables.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py tests/test_model_gateway.py -q` 结果 `43 passed, 1 warning`。
+- 依赖结论：后端契约通过，可以进入前端交互收敛和真实浏览器流式回归。
+
+#### Step 12.3A：提示词与流式开关交互（completed，2026-07-22）
+
+- 提示词：删除用户提示词旁的变量插入按钮，用户直接输入 `${变量名}`；右上角变量查看按钮仍保留。
+- 输出开关：使用单个默认关闭的 `role=switch` 控件；高级参数编辑器隐藏 `stream` 字段，切换开关是唯一输出模式入口。
+- 输出变量：LLM 流式模式隐藏输出变量配置，保留草稿数据；切回阻塞模式后恢复配置，阻塞模式显示“提取表达式”字段。
+- 验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py tests/test_workflow_variables.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py -q` 结果 `46 passed, 1 warning`。
+- 依赖结论：前端交互收敛通过，下一步进行真实浏览器的默认阻塞和流式端到端验证。
+
+#### Step 12.3B：输出变量类型与过滤比较（completed，2026-07-22）
+
+- 类型契约：所有节点输出映射统一支持大写 `AUTO / STRING / INTEGER / NUMBER / BOOLEAN / OBJECT / ARRAY`；旧映射缺省为 `AUTO`，保存时拒绝未知类型。
+- 转换时机：先按 `request / response` 原生路径提取，再执行目标类型转换，最后写入运行记录和下游变量；`null` 对所有类型保持 `null`。
+- 严格转换：`STRING` 使用 JSON 语义序列化非字符串值；`INTEGER / NUMBER / BOOLEAN` 拒绝不安全的隐式转换；`OBJECT / ARRAY` 接受原生对象/数组或合法 JSON 字符串；转换失败使节点 `FAILED`，错误包含变量名和目标类型。
+- 过滤器：统一路径过滤增加 `< / > / <= / >= / == / != / contain`；`contain` 仅支持字符串子串，比较不自动做日期解析或跨类型强制转换；仍只允许一个条件且必须唯一命中。
+- 验证：`uv run pytest tests/test_workflow_variables.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py -q` 结果 `70 passed, 1 warning`。
+- 依赖结论：类型转换和过滤器后端契约已通过，可以接入所有节点的输出变量编辑 UI。
+
+#### Step 12.3C：输出变量类型编辑器（completed，2026-07-22）
+
+- 通用布局：`HTTP / LLM / AGENT / SCRIPT` 共用输出变量行调整为“变量名｜类型｜提取表达式｜操作”，类型下拉固定提供 `AUTO / STRING / INTEGER / NUMBER / BOOLEAN / OBJECT / ARRAY`。
+- 默认与兼容：新增输出变量默认 `AUTO`；旧草稿缺少 `type` 时按 `AUTO` 展示和执行，不需要数据迁移。
+- 流式边界：LLM 流式模式继续隐藏整组输出变量配置并保留草稿，阻塞模式恢复后可编辑目标类型。
+- 日志修复：运行中的流式记录不再显示 `undefined`，未收到数据时显示“正在接收原始响应…”，收到数据后显示原始片段摘要。
+- 验证：`uv run pytest tests/test_execution_frontend.py tests/test_workflow_variables.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py -q` 结果 `78 passed, 1 warning`；`npm run build` 成功生成最新 Workflow JS/CSS bundle。
+- 依赖结论：前后端类型配置已通过专项验证，可以进入浏览器持久化、真实模型和全量发布回归。
+
+#### Step 12.3D：流式输出标题与对齐（completed，2026-07-22）
+
+- 交互文案：LLM 设置页的输出开关标题由“输出方式”统一改为“流式输出”，开关旁不再重复显示文字，仅保留可访问的 `aria-label`。
+- 布局：标题显式左对齐，开关保持独立控件，避免重复文案导致的视觉拥挤；默认关闭和流式模式语义不变。
+- 验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`；`git diff --check` 通过。
+- 浏览器验收：在当前持久化 Workflow 的 LLM 编辑器实测仅出现一处“流式输出”，旧“输出方式”文案计数为 0，`role=switch` 控件计数为 1；标题左对齐 CSS 已加载生效，开关语义未改变。
+- 反馈修正：标题增加 `font-weight: 600`，设置 `min-height: 19px`、`display: flex` 和 `align-items: center`，与开关轨道保持同高并垂直对齐；专项前端测试更新为 `8 passed, 1 warning`，构建重新成功。
+- 依赖结论：标题调整已通过专项验证，可以继续进行浏览器端到端和发布回归。
+
+#### Step 12.3E：输出类型真实浏览器端到端（completed，2026-07-22）
+
+- 配置：在持久化 Workflow 的 DeepSeek LLM 节点中，将 `llm_output` 设为 `STRING`，新增 `token_count | INTEGER | response.usage.total_tokens`，通过节点保存入口持久化。
+- 真实执行：使用本机模型管理中的 `deepseek-v4-pro` 完成一次阻塞运行，终态 `PASSED`、耗时 `7441ms`；`llm_output` 为原生字符串，`token_count` 为 `Int64=427`，与 `usage.total_tokens=427` 完全一致。
+- 日志与回读：原始响应日志长度为 `1326` 字符，未因输出提取做结构化替换；草稿 API 回读确认两行类型分别持久化为 `STRING / INTEGER`，表达式保持不变。
+- 价值结论：已用真实供应商响应证明“提取 → 类型转换 → 保存变量 → 草稿恢复”的完整链路可用，而非仅依赖 Stub 或静态前端断言。
+
+#### Step 12.3F：节点变量值复制（completed，2026-07-22）
+
+- 使用场景：Workflow 作者查看全局、祖先和当前节点变量时，可直接复制完整变量值用于参数填写、提取表达式调试或与原始日志核对。
+- 交互：变量面板改为“变量名｜变量值｜操作”三列；每条有值变量提供独立复制图标和变量名工具提示，尚无值时按钮禁用。
+- 数据语义：字符串复制原值，对象/数组复制格式化 JSON；复制内容不受列表中的单行省略显示影响。优先使用 Clipboard API，并保留本机浏览器兼容回退；成功或失败均显示提示。
+- 验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`；`git diff --check` 通过。
+- 浏览器验收：刷新最新 bundle 后，当前节点的 `llm_output / token_count` 均出现唯一复制按钮；点击 `token_count` 后页面真实显示“已复制变量 token_count”，未读取系统剪贴板内容。
+- 依赖结论：变量值复制前端契约已通过，可以进入真实页面交互回归。
+
+#### Step 12.3G：复制权限失败兼容（completed，2026-07-22）
+
+- 问题复现：部分嵌入式浏览器会暴露 `navigator.clipboard`，但在实际点击时拒绝写入权限；原逻辑在该情况下直接失败，未尝试兼容路径。
+- 修复：Clipboard API 写入失败后自动降级到聚焦隐藏文本框、选中完整内容并执行 `document.execCommand('copy')`；资源版本号递增，确保浏览器加载最新 bundle。
+- 验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`；浏览器刷新后点击 `复制变量值 token_count`，剪贴板实际读回本次运行的 `1426`，并显示“已复制变量 token_count”。
+- 依赖结论：复制按钮已覆盖 Clipboard API 正常、权限拒绝降级和对象/数组格式化语义，可继续最终全量回归。
+
+#### Step 12.3H：节点编辑器窗口与浏览器缩放（completed，2026-07-22）
+
+- 业务目标：用户缩小节点编辑器时保留更多画布上下文，放大时提高提示词、代码和日志的可读性；浏览器整体缩放必须继续同步作用于编辑器字体。
+- 窗口缩放：以节点编辑器本次打开时的尺寸为 `1.0` 基准，拖动八向缩放手柄时按宽高比例中的较小值连续缩放编辑器全部文字与控件，限制在 `0.75–1.35`，避免最小窗口不可读和最大窗口内容溢出。
+- 浏览器缩放：不接管或抵消浏览器原生缩放；编辑器内部比例与浏览器缩放倍率叠加，重新打开或刷新时均以当时视口建立新的 `1.0` 基准。
+- 专项验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`。
+- 浏览器 A 验收：编辑器基线 `1064x896`、标题可视高度 `18px`；放大到 `1172x1001` 后比例 `1.065`、标题高度 `19.17px`；缩小到 `952x811` 后比例 `0.865`、标题高度 `15.57px`；内容容器 `scrollWidth == clientWidth`，无横向溢出。
+- 浏览器 B 验收：未对页面添加自定义浏览器缩放拦截或反向补偿；编辑器的内部缩放比例只由 Rnd 八向拖拽回调改变，浏览器缩放由浏览器原生作用于整个编辑器，刷新时重新建立当前视口的 `1.0` 基准。桌面浏览器自动化快捷键不暴露浏览器级缩放状态，因此不宣称通过快捷键改变浏览器倍率。
+- 发布处理：前端资源版本递增至 `v=26`，避免用户刷新时复用旧 bundle。
+- 依赖结论：节点编辑器窗口缩放和浏览器原生缩放边界已收敛，可以进入最终全量回归与发布。
+
+#### Step 12.4：真实模型、全量回归与发布（completed，2026-07-22）
+
+- 真实模型：千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 已在 Step 12.2 的真实企业 Agent 合规评测场景通过；Step 12.3E 另以 DeepSeek 真实响应验证 `STRING / INTEGER` 提取、类型转换、日志与草稿恢复。
+- 前端 E2E：已覆盖模型选择、阻塞运行、原始日志、输出类型、变量复制、流式标题以及节点编辑器窗口放大/缩小；复制验收以剪贴板真实读回值为准，不再只依赖提示消息。
+- 全量回归：`uv run pytest -q` 结果 `171 passed, 6 skipped, 1 warning in 14.30s`；6 项跳过均为未在本轮进程注入 live 环境变量的真实供应商用例，warning 为既有 Starlette/httpx 弃用提示。
+- 构建与静态检查：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`uv run python -m compileall -q execution web` 和 `git diff --check` 全部通过。
+- 安全扫描：待提交文件 `sk-` 候选扫描排除构建产物中的 CSS 标识符后，带数字的凭据候选为 0；未把用户 API Key 写入代码、测试、文档或提交内容。
+- 测试数据清理：真实 E2E 临时 Workflow `fe539097aaca4befbd2c049abe0990ef` 已通过删除 API 清理，随后 GET 返回 `404`。
+- 发布结果：功能与测试改造已提交为 `8d405e9`（`Add persistent LLM workflow execution`），并成功推送到 `origin/codex/tool-template-refactor`；随后本计划收口记录单独提交并同步推送。
+
+#### Step 13：Script 节点参数页签收敛（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- Script 节点的“参数”页签当前只展示只读的 `parameterRecords` 快照，不负责配置脚本输入；在真实编辑场景中通常为空，并与变量面板、日志详情形成重复入口。
+- 本步骤目标是让 Workflow 作者在 Script 节点内按实际工作流完成三件事：在“代码”页编写脚本，在右上角变量面板核对可引用值，在“设置 → 输出变量”声明下游变量；执行结果和错误统一进入“日志”。
+
+##### 用户与真实场景（Who / Where）
+
+- 用户：编排评测 Workflow 的业务或测试工程师。
+- 场景：用户双击 Script 节点修改 `main.py`，需要查看上游输出并确认脚本结果；此时参数快照既不能编辑输入，也不能替代日志和变量面板。
+
+##### 需求范围与优先级（What / When）
+
+- 高优先级、前端交互收敛：Script 编辑器只保留“设置 / 代码 / 日志”三页。
+- “设置”继续保留名称、说明、运行配置和输出变量；“代码”继续保留 `main.py`；“日志”继续保留运行状态、结果和错误。
+- 右上角变量面板继续作为 Script 调试输入的唯一查看入口；不新增一套参数映射 UI。
+- 共享 `parameterRecords` 数据结构暂不删除，因为 HTTP / AGENT 仍使用参数查看能力；本步骤不改后端运行协议、不改变历史草稿读取。
+- 已确认 `1A 2A`：本步骤同时为 `HTTP / AGENT / LLM / SCRIPT` 接入真实执行；日志按“原始请求 / 原始 stdout / 原始 response / 原始 stderr 与 traceback”分区展示，但不改写原始文本；输出变量只能依据原始 `request / response` 结构提取。
+
+##### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 13.1 | 原始日志持久化 | Worker stdout/stderr；运行记录新增原始流字段 | Worker 流归属、SQLite 重启回读、10 条保留 | 无 |
+| 13.2 | 四类真实执行 | HTTP 配置、AGENT/SCRIPT `main.py`、LLM 网关 | 四类成功/失败、request/response 提取、无密钥日志 | 13.1 |
+| 13.3 | 统一日志 UI | 四类运行记录 | 浏览器展开原始四区、错误定位、节点状态 | 13.2 |
+| 13.4 | 集成发布 | 完整 Workflow Studio | 全量 pytest、构建、真实浏览器、推送 | 13.1-13.3 |
+
+##### 验收标准与价值验证（How to Measure）
+
+- Script 节点编辑器不显示“参数”按钮，且节点切换或旧状态恢复时不会渲染参数面板。
+- Script 的“设置 / 代码 / 日志”、变量按钮和输出变量配置均可正常使用；HTTP / AGENT 的参数页签保持不变。
+- `npm run build`、专项前端测试和真实浏览器双击 Script 流程通过，桌面布局无重叠或横向溢出。
+- 实现进度：已加入 `isScript / showParametersTab` 路由判定；切换节点时重置到 `initialTab`，避免从 HTTP/AGENT 参数页切换到 Script 后残留隐藏面板。`npm run build` 成功，`uv run pytest tests/test_execution_frontend.py -q` 为 `8 passed, 1 warning`，`node --check web/static/assets/workflow-canvas.js` 通过。
+- 13.1 已完成：`WorkflowNodeRunRecord` 增加 `stdout/stderr`，SQLite 自动迁移 `stdout_body/stderr_body`；Worker 事件携带原始流来源并分别收集。`uv run pytest tests/test_tool_execution.py tests/test_workflow_drafts.py -q` 为 `15 passed, 1 warning`，Python 编译通过。
+- 13.2 已完成：HTTP 使用真实请求配置进入 Worker，AGENT/SCRIPT 使用真实 `main.py` 子进程；四类节点统一按 `request / response` 提取输出变量。成功/失败均保存原始 stdout、stderr、response 和 traceback，HTTP 非 2xx 保留原始响应。专项 `uv run pytest tests/test_workflow_node_runs.py -q` 为 `5 passed, 1 warning`，与既有 LLM/Worker/草稿专项合计 `24 passed, 1 warning`。
+- 13.3 已完成：四类节点共用可展开运行历史，摘要显示日期、状态、耗时和最终结果；详情按原始请求、stdout、response、stderr、traceback 分区展示，空区不伪造内容，保留原始文本。运行入口与日志加载扩展到 HTTP/AGENT/LLM/SCRIPT。`npm run build`、`node --check web/static/assets/workflow-canvas.js` 和 `uv run pytest tests/test_execution_frontend.py -q`（`8 passed, 1 warning`）通过；节点执行专项现为 `6 passed, 1 warning`。
+- 13.4 已完成：浏览器真实 Script 成功运行以 `212ms` 进入 `PASSED`，展开日志显示原始 request/stdout/response/stderr，并提取 `browser_value=浏览器回归`；失败运行以 `222ms` 进入 `FAILED`，保留执行前 stdout、用户 stderr、Worker traceback 和路由 traceback。全量回归 `177 passed, 6 skipped, 1 warning in 16.92s`，构建、Python/JS 静态检查和 `git diff --check` 通过；临时 Workflow 删除后 GET 为 `404`。
+- 13.5 发布完成：提交 `7f15ac9`（`Add real workflow node execution logs`）已推送到 `origin/codex/tool-template-refactor`。
+
+#### Step 14：Workflow 与节点中断控制（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- 当前画布运行会按定时器触发节点，运行按钮可重复点击，后端节点请求没有可由画布调用的统一取消协议；长耗时测试容易重复消耗资源，也无法在发现配置错误后及时停止。
+- 目标是在画布级和节点级提供一致的运行锁、中断入口、耗时计时与可重新运行能力，同时保证中断后的执行范围可预测。
+
+##### 已确认需求（What）
+
+- 画布运行期间禁用重复运行；运行按钮左侧显示累计计时器；顶部“全局变量”右侧和画布右键菜单均提供中断入口；中断后可重新从头运行。
+- 节点运行期间禁用该节点所有运行入口；节点卡片、节点右键菜单和编辑器标题栏均提供中断入口；未运行或已结束节点点击中断不改变状态；中断后可重新运行节点。
+- 节点中断后，本次 Workflow 中该节点的后续节点不再执行；四类节点的原始日志和错误追溯规则继续适用。
+
+##### 实现前必须确认
+
+- 中断节点在既定四状态中显示 `FAILED` 还是恢复 `PENDING`。
+- 在分支 Workflow 中，“后续节点”是仅指被中断节点的图后代，还是停止本次 Workflow 的所有剩余节点。
+- 当前按横坐标定时触发的画布演示调度是否在本步骤升级为依据连线的真实 DAG 调度。
+- 用户已确认：`PASSED` 全局更名为 `SUCCESS`，最终状态集合为 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；执行失败与用户中断严格区分；节点级中断仅停止当前节点及其图后代，独立分支继续；调度采用 `3B` 真实 DAG，依赖满足后独立分支并行。任一节点 `FAILED` 或 `INTERRUPTED` 后，其图后代在本次运行中保持未执行。
+
+##### Step 14 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 14.1 | 后端节点取消协议 | 活动运行注册、Worker/LLM 取消、`INTERRUPTED` 记录 | 重复运行拒绝、运行中中断、终态中断无副作用、日志回读 | 无 |
+| 14.2 | 并行 DAG 调度 | 节点/边、SUCCESS/FAILED/INTERRUPTED | 独立分支并行、后代阻断、失败分支不影响独立分支 | 14.1 |
+| 14.3 | 画布级控制 | 运行锁、计时器、顶部/右键中断 | 连续点击禁用、中断全部活动节点、重新从头运行 | 14.1-14.2 |
+| 14.4 | 节点级控制 | 卡片/右键/编辑器运行与中断 | 运行锁、三处中断一致、后代不执行、节点可重跑 | 14.1-14.3 |
+| 14.5 | 集成发布 | 完整 Workflow Studio | 专项/全量 pytest、构建、真实浏览器 E2E、推送 | 14.1-14.4 |
+
+##### 14.1 后端节点取消协议（completed，2026-07-22）
+
+- 状态契约：`WorkflowNodeRunStatus` 统一提供 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；SQLite 初始化会把历史 `PASSED` 行迁移为 `SUCCESS`，内部查询命名同步为 `latest_success_run`。
+- 活动运行：节点运行按 `(workflow_id, node_id)` 注册；同一节点已有活动运行时返回 HTTP `409`。活动 Worker 保存 `run_id`，中断接口终止 Worker 进程树；LLM 非流式任务取消当前 asyncio 任务。
+- 流式 LLM：响应生成器开始时绑定实际任务，支持中断前置竞态、运行中 `CancelledError` 和客户端断开后的清理；已接收的原始 chunk 保存到 `response_body`，最终记录为 `INTERRUPTED` 并保留 `INTERRUPTED` 错误事件。
+- API：新增 `POST /api/workflow-drafts/{workflow_id}/nodes/{node_id}/interrupt`；未运行、已完成或已中断节点返回 `{"interrupted": false}`，不创建额外运行记录。
+- 验证：`uv run pytest tests/test_workflow_node_runs.py::test_script_node_can_be_interrupted_and_rejects_duplicate_runs -q` 通过；`uv run pytest tests/test_llm_node_runs.py::test_llm_stream_can_be_interrupted_and_persists_partial_raw_response -q` 通过；两项均覆盖重复启动、运行中断、日志回读和中断后重跑/部分原始响应。现有 Workflow/LLM/节点专项合计 `23 passed, 1 warning`；Python 编译通过。
+- 依赖结论：后端节点级取消协议已具备稳定终态和清理语义，可以进入真实 DAG 调度实现；此前业务数据提取测试中的字符串 `PASSED` 保持原样，不属于运行状态。
+
+##### 14.2 并行 DAG 调度（completed，2026-07-22）
+
+- 调度规则：运行入口依据 Workflow 连线构建前驱表；无前驱节点同时进入就绪队列，独立分支通过 `Promise.race` 并行推进；只有节点返回 `SUCCESS` 才会解锁后继节点。
+- 失败隔离：节点返回 `FAILED` 或 `INTERRUPTED` 时，仅将其图后代标记为本次未执行并保持 UI `PENDING`；没有依赖关系的分支继续执行。Workflow 级中断会设置全局中断标记，停止活动节点且不再启动剩余节点。
+- 运行锁：Workflow 活动期间 `运行` 按钮禁用；同一节点通过 ref 活动表避免重复调用，节点运行结束或中断后可再次启动。节点卡片、右键菜单和编辑器标题栏共享同一中断回调。
+- 控件：画布运行按钮左侧显示累计耗时；“全局变量”右侧新增画布中断按钮；画布右键新增“中断测试”；节点卡片保留运行并新增中断，节点右键新增“中断此步骤”，编辑器标题栏同步提供运行/中断锁定状态。
+- 状态：前端统一展示 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`，节点运行历史摘要对 `INTERRUPTED` 显示中断错误而非伪造成功结果。
+- 验证：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`git diff --check` 通过；资源版本断言同步为 `v=28` 后，`uv run pytest tests/test_execution_frontend.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py tests/test_workflow_drafts.py -q` 结果为 `31 passed, 1 warning`，覆盖前端契约、Script/HTTP/LLM 执行和取消协议。
+
+##### 14.3 画布级控制（completed，2026-07-22）
+
+- 真实浏览器运行锁：临时 Workflow 进入运行后，顶部运行按钮禁用、中断按钮启用，累计计时器从 `810ms` 持续增长；活动 Script 节点同步显示 `RUNNING` 并禁用节点运行入口。
+- 顶部中断：点击顶部中断后，活动 Script 进入 `INTERRUPTED`，Workflow 提示“Workflow 已中断”，运行按钮重新启用且中断按钮禁用；本次计时器冻结在 `10.0s`。
+- 重新运行：中断后再次点击顶部运行，Script 重新进入 `RUNNING`，证明 Workflow 可从头启动新一轮执行；随后再次中断，终态仍稳定为 `INTERRUPTED`。
+- 右键中断：运行期间在画布空白区打开右键菜单，确认“中断测试”存在并可实际终止活动 Script；菜单关闭后节点保持 `INTERRUPTED`，未继续启动剩余节点。
+- 依赖结论：画布运行锁、累计计时、两处中断入口和中断后重跑已通过真实浏览器验收，可以进入节点三入口验收。
+
+##### 14.4 节点级控制（completed，2026-07-22）
+
+- 编辑器入口：30 秒 Script 运行时，编辑器运行按钮禁用、中断按钮启用，卡片耗时从 `0ms` 累加；点击编辑器中断后节点进入 `INTERRUPTED`，运行按钮恢复且中断按钮禁用。
+- 卡片入口：卡片运行后同样禁用重复运行并启用中断；点击卡片中断后状态为 `INTERRUPTED`，运行入口重新可用。
+- 右键入口：节点右键菜单显示“中断此步骤”，运行期间点击后真实终止 Worker，菜单关闭且节点进入 `INTERRUPTED`。
+- 原始日志：最近一次中断记录摘要显示 `07-22 03:28:23 / INTERRUPTED / 23.6s / 用户中断节点`；展开后保留原始 request 和原始 stdout `browser interrupt`，没有因中断丢弃运行前已输出内容。
+- 成功状态：同一节点此前完整运行记录在卡片和日志中均显示 `SUCCESS`，不再显示 `PASSED`。
+- 依赖结论：节点卡片、右键菜单和编辑器三处运行锁/中断语义一致，且中断日志满足原始输出铁律，可以进入集成发布回归。
+
+##### 14.5 集成发布（completed，2026-07-22）
+
+- 状态契约：源码、前端构建产物、测试和项目说明统一使用 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；历史 SQLite `PASSED` 自动迁移并有专项测试覆盖。
+- 调度与中断：后端阻塞/流式节点取消、同节点 `409` 运行锁、前端真实 DAG 并行、失败/中断后代阻断、画布和节点全部中断入口均完成。
+- 浏览器回归：覆盖编辑器、卡片、节点右键、画布顶部和画布右键五类入口；验证运行禁用、累计计时、原始 stdout 保留、中断终态和重新运行。
+- 最终回归并入 Step 15.3：全量 `185 passed, 6 skipped, 1 warning`，构建、JS/Python 静态检查和差异检查均通过。
+
+#### Step 15：禁止游离节点（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- Workflow 保存后会被真实 DAG 调度执行；若节点不在完整执行链上，用户容易误以为该节点会参与测试，实际却永远不会启动或无法汇入结束节点。
+- 目标是在不妨碍拖拽编辑的前提下，确保每个可执行节点都属于完整的 `START → ... → END` 有向路径。
+
+##### 用户与真实场景（Who / Where）
+
+- 用户：在 Workflow Studio 编排企业 Agent 测试流程的业务或测试工程师。
+- 场景：用户可以在编辑过程中临时断开节点；只有点击保存或运行时才需要得到明确错误，并定位所有不可从 START 到达或无法到达 END 的节点。
+
+##### 已确认范围与优先级（What / When）
+
+- 采用严格规则 `1A`：每个业务节点必须同时满足“可从 START 到达”和“可以到达 END”；完全无边、只有入边、只有出边、断裂分支均属于游离节点。
+- 采用双层校验 `2A`：前端保存/运行立即拦截，后端草稿保存和节点运行接口同步拒绝，避免绕过页面。
+- 仅在保存和执行时检测；拖拽、连线和删除过程不实时打断编辑。
+
+##### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 15.1 | 后端图完整性校验 | nodes/edges；结构化错误 | 合法 DAG、无边、不可达、死路、API 保存/运行拒绝 | 无 |
+| 15.2 | 前端保存/运行拦截 | 当前 React Flow 图；节点名称提示 | 前端专项断言与构建 | 15.1 |
+| 15.3 | 端到端回归与发布 | Workflow Studio 完整流程 | 真实浏览器、专项/全量测试、构建、推送 | 15.1-15.2 |
+
+##### 验收标准与价值验证（How to Measure）
+
+- 合法分支 DAG 可以保存和运行；任一业务节点不在完整 `START → END` 路径上时，保存和运行均失败。
+- 错误提示包含游离节点名称，用户无需逐条排查连线。
+- 直接调用后端 API 不能绕过规则；历史草稿仍可读取和编辑，在重新保存或运行时才触发校验。
+- 节点中断、`SUCCESS` 状态、原始日志和现有变量提取能力不受影响。
+
+##### 15.1 后端图完整性校验（completed，2026-07-22）
+
+- 共享规则：新增保存/执行时图校验；要求且仅允许一个 `START` 和一个 `END`，并通过正向可达集与反向可达集的交集判断每个节点是否处于完整 `START → END` 路径。
+- 错误定位：无边、从 START 不可达、无法到达 END 和断裂分支均返回 HTTP `422`，错误包含全部游离节点名称或 ID。
+- 历史兼容：规则不放入草稿 Pydantic 读取模型；历史无效草稿仍可 GET 和编辑，但 PUT 保存或节点执行时被拒绝。
+- 防绕过：草稿 POST/PUT、阻塞节点运行和流式 LLM 运行均调用同一后端校验；活动运行先原子注册，再校验并在失败时清理，保持重复运行 `409` 语义。
+- 测试夹具：Script/Agent/HTTP/LLM 执行用例统一升级为 `START → 业务节点 → END`，下游 LLM 用例升级为完整串行路径。
+- 验证：`uv run pytest tests/test_workflow_drafts.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py -q` 结果 `28 passed, 1 warning`；覆盖合法并行 DAG、无边、不可达、死路、更新绕过、历史草稿执行绕过、重复启动、中断及原始流日志。
+- 依赖结论：后端保存和执行边界已收敛，可以接入前端保存/运行即时提示。
+
+##### 15.2 前端保存/运行拦截（completed，2026-07-22）
+
+- 前端规则：React Flow 当前节点/边通过与后端一致的正向、反向可达性算法校验；缺少唯一 START/END 或存在不在完整路径上的节点时返回明确错误。
+- 触发时机：`persistDraft`、节点运行和画布运行三个入口调用校验；拖拽、连线、删除、复制和粘贴过程中不执行校验，允许用户临时断开图。
+- 交互结果：保存失败状态显示为“保存失败”，Toast 列出游离节点名称；运行不会启动计时器、不会把节点改成 `RUNNING`，也不会向后端发送执行请求。
+- 构建发布：`npm run build` 成功生成最新 JS/CSS bundle，首页资源版本递增为 `v=29`。
+- 验证：`node --check web/static/assets/workflow-canvas.js`、`git diff --check` 通过；`uv run pytest tests/test_execution_frontend.py -q` 结果 `8 passed, 1 warning`。
+- 依赖结论：前后端规则一致，可以进入真实浏览器的无边、死路、合法路径保存/运行验收。
+
+##### 15.3 端到端回归与发布（completed，2026-07-22）
+
+- 浏览器无边场景：删除默认 HTTP 中间节点后点击保存，页面显示 `Workflow 存在游离节点: 开始, 执行企业 Agent, 模型质量判断, 规则校验, 完成`，状态变为“保存失败”；点击运行不会启动 Workflow 计时器、不会出现 `RUNNING`。
+- 浏览器合法场景：撤销删除恢复 `START → HTTP → AGENT → (LLM/SCRIPT) → END` 完整路径后保存成功并显示“Workflow 草稿已保存”。
+- 后端死路/不可达：专项覆盖无边、只有入边、只有出边和完整并行分支；直接 POST/PUT/节点运行 API 均按规则返回 `422` 或正常接受合法图。
+- 回归结果：全量 `uv run pytest -q` 为 `185 passed, 6 skipped, 1 warning in 18.60s`；专项草稿/节点/LLM/前端为 `37 passed, 1 warning`。
+- 构建检查：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`uv run python -m compileall -q execution web tests`、`git diff --check` 全部通过。
+- 状态契约：运行状态对外统一为 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；SQLite 历史 `PASSED` 仅作为一次性迁移输入，普通响应字段中的同名业务值保持原样。
+- 安全：代码、测试、文档和构建产物未发现用户 API Key 候选；浏览器临时 Workflow 已删除，API 列表回到 0 条。
 
 ## 22. 待优化项目
 

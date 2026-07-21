@@ -11,8 +11,6 @@ config.yaml
 # Local application data
 inputs/*
 !inputs/.gitkeep
-tool_registry/*
-!tool_registry/.gitkeep
 run_storage/
 outputs/
 logs/
