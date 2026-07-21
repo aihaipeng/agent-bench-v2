@@ -1,0 +1,841 @@
+# Workflow Studio 工具模板化与执行协议计划（T13.2）
+
+> 状态：T13.1 前端高保真原型和回归已完成；T13.2 不可兼容重构进行中。旧工具数据和旧 Workflow/Run 链路已删除，四类大写工具模板模型、目录仓储、CRUD/ZIP API、工具模板前端、独立执行、画布深拷贝和发布模板已完成；新版 Workflow 持久化协议尚待确认和实现。
+>
+> 更新时间：2026-07-20
+>
+> 范围：新版全屏 Workflow Studio 和新的工具模板体系。旧固定 Workflow、旧 Run 页面/API/执行链以及当前 Script / Agent 工具协议将被删除，不提供兼容迁移。
+>
+> 事实来源优先级：用户最新确认 > 本计划的“已确认决策” > `docs/enterprise-agent-test-orchestration.md` 中的既有规则。未列为“已确认”的内容不得直接实现。
+
+## 1. 业务背景与目标（Why）
+
+Agent Bench v2 没有成熟的插件体系，也没有专门团队持续适配各模型厂商的协议、SDK、流式格式、结构化输出、Tool Calling、推理模式和中间件差异。现有 Agent 工具包含较多 Python 硬编码，是为了让工具作者能够直接处理供应商差异和特殊业务场景，而不是依赖平台先完成深度适配。
+
+新版 Studio 的目标不是建设一个类似大型厂商市场的插件生态，而是解决以下实际问题：
+
+- 新手不会从零编写完整 HTTP、LLM、Agent 或 Script 工具。
+- 工具作者需要提供完整、可运行、可导入导出的起始模板。
+- Workflow 编排人员需要在模板基础上修改少量代码或配置，快速得到当前 Workflow 的个性化工具。
+- 画布中验证成熟的工具需要能够沉淀回模板库，供其他人再次使用。
+- Workflow 必须自包含；模板被修改、删除或未随环境迁移时，已经保存的新版 Workflow 仍应可恢复和执行。
+- 平台不能假装拥有并不存在的统一模型适配能力。LLM 和 Agent 必须保留完整 Python 修改能力。
+
+本阶段的核心产品定位是：
+
+```text
+工具模板库负责提供完整起点
+        ↓ 深拷贝
+画布工具负责当前 Workflow 的个性化实现
+        ↓ 可选发布
+产生新的独立工具模板
+```
+
+## 2. 目标用户与真实场景（Who & Where）
+
+### 2.1 工具模板作者
+
+- 在工具模板库创建完整的 HTTP、LLM、Agent 或 Script 模板。
+- 为模板提供可运行代码、类型配置、输入输出说明和安全默认值。
+- 在模板库中独立测试模板。
+- 通过模板包将工具交给其他 Agent Bench 用户。
+
+### 2.2 Workflow 编排人员
+
+- 在全屏 Studio 中新增空白工具，或从模板库选择现成模板。
+- 将模板复制到画布后修改少量业务代码、Prompt、请求配置或输出处理。
+- 配置当前 Workflow 特有的上游输入、下游输出、重试、延迟和重复执行。
+- 不需要理解或管理模板与节点之间的版本引用关系。
+
+### 2.3 模板接收者
+
+- 导入其他人提供的工具模板包。
+- 在模板库中独立测试导入的模板。
+- 将模板复制到自己的 Workflow 中继续个性化。
+- 不接收发布者的真实 API Key。
+
+## 3. 需求真实性与优先级（What & When）
+
+该需求来自明确的用户使用目标，不是为了抽象而抽象。工具模板化、画布工具所有权和执行自由度是 T13.2 的 P0 架构前置项，优先级高于继续细化 Agent / LLM 编辑器视觉布局。
+
+原因如下：
+
+- 如果所有权不明确，保存、复制、导出、删除和发布都会产生歧义。
+- 如果先做 UI，后续确定深拷贝或引用模型时会整体返工。
+- 如果先做“平台原生 LLM 执行器”，会形成无法持续维护的供应商适配层。
+- 如果沿用旧固定 WorkflowDefinition，会把 T13.1 的任意画布原型错误套入旧执行拓扑。
+
+## 4. 已确认的核心决策
+
+### 4.1 新旧系统范围
+
+- 新的“模板深拷贝到画布”模型只用于新版 Workflow Studio。
+- 旧固定 Workflow、历史 Run 页面、相关 API 和固定拓扑执行链路全部删除。
+- 旧 Script / Agent 工具定义、旧 ZIP 和旧 `manifest.json + main.py` 协议不提供导入或运行兼容。
+- 旧本机工具数据由用户明确选择永久删除，不备份、不迁移。
+- T13.2 不得直接复用旧 `WorkflowDefinition` 作为新版 DAG 协议。
+
+### 4.2 模板与画布工具没有运行时引用关系
+
+- 工具模板库中的对象是完整、可运行的起始模板。
+- 从模板库拖入或选择模板时，系统将模板定义深拷贝为画布工具。
+- 深拷贝完成后，画布工具不再引用来源模板。
+- 修改模板不影响已经创建的画布工具。
+- 修改画布工具不影响来源模板。
+- 删除模板不影响已经保存的新版 Workflow。
+- 新版 Workflow 保存和导出时包含画布工具的完整定义，不依赖目标环境仍存在来源模板。
+- 不建设模板版本升级、自动传播、回滚或依赖影响分析机制。
+
+### 4.3 画布保留工具构建能力
+
+- 画布必须允许直接新建 HTTP、LLM、Agent 和 Script 工具。
+- 用户可以从空白定义开始，也可以从模板库复制完整模板开始。
+- 画布中的工具可以发布到工具模板库。
+- 发布后的模板与当前画布工具相互独立，后续修改不自动同步。
+- 画布不是第二套共享仓库；画布只维护当前 Workflow 内嵌的工具定义。
+
+### 4.4 四类执行工具进入同一个工具模板体系
+
+页面名称统一使用“工具模板”，并统一管理以下四种类型：
+
+```text
+HTTP
+LLM
+AGENT
+SCRIPT
+```
+
+- `Start / End` 是 Workflow 系统控制节点，不是工具，不进入模板库。
+- 四类工具共享模板创建、测试、搜索、筛选、导入、导出和发布生命周期。
+- 四类工具不要求使用相同执行器；统一的是资产生命周期，不是运行实现。
+- 类型在前端、API、`manifest.json`、`definition.json`、画布节点和运行快照中一律使用大写 `HTTP / AGENT / LLM / SCRIPT`，不接受或输出旧小写类型。
+
+### 4.5 包结构采用 manifest + definition + 可选代码
+
+已确认目标包结构为：
+
+```text
+{template_id}/
+├── manifest.json
+├── definition.json
+└── main.py          # 按类型决定是否必需
+```
+
+- `manifest.json` 保存模板身份、类型、格式版本和展示元数据。
+- `definition.json` 保存类型配置、输入输出、凭据要求、测试示例等结构化定义。
+- `main.py` 对 LLM、Agent、Script 必需。
+- `main.py` 对 HTTP 可选。
+- 不再为没有 Python 实现的 HTTP 配置模式生成无意义的空 `main.py`。
+- 旧 `manifest.json + main.py` Script / Agent ZIP 不再兼容；导入时必须作为无效旧格式拒绝。
+
+### 4.6 模板必须支持独立测试
+
+- 工具模板库继续提供独立测试运行能力。
+- 模板发布或导出前应能使用测试输入验证基本可执行性。
+- 测试运行不得依赖某个 Workflow 的画布位置、连线或运行历史。
+- 测试使用的输入样例、凭据绑定和日志是否保存，需要在数据协议子任务中继续确认。
+
+### 4.7 发布时移除真实 API Key
+
+- 从画布发布模板时，自动移除真实 API Key。
+- 模板只保留“需要某类凭据”的声明、安全占位或空值。
+- API Key 不得从画布工具泄漏到新模板。
+- 旧工具 ZIP 导入导出能力随旧协议删除，不保留明文密钥导出行为。
+- Authorization Header、Cookie、自定义 Token 和代码中硬编码密钥的识别与处理尚未确认，列入开放问题。
+
+### 4.8 统一 Python 运行数据协议
+
+- LLM、AGENT、SCRIPT 以及 HTTP 代码模式统一使用 `inputs / config / response`。
+- `inputs` 是本次运行由 Start、上游节点或运行参数传入的动态数据；模板和 Workflow 只保存映射，不保存某次运行的实际值。
+- `config` 是随工具模板或画布节点保存的持久配置；凭据是否只保存引用仍需单独确认。
+- `response` 是当前节点本次执行产生的标准 JSON 输出，供下游节点、运行追溯和 Artifact 使用，不写回工具模板。
+- 不继续使用旧 Agent 六个固定模板参数，也不把节点配置混入 `inputs`。
+
+## 5. 工具模板与画布工具的白话边界
+
+```text
+模板库中的工具：一份完整参考答案
+画布中的工具：把参考答案复制过来后，为当前 Workflow 改出的个人版本
+```
+
+双方的职责如下：
+
+| 工具模板库 | 画布工具 |
+|---|---|
+| 提供完整起始代码与配置 | 保存当前 Workflow 的完整个性化实现 |
+| 可以独立测试 | 可以在 Workflow 中运行和追溯 |
+| 可以导入、导出 | 随 Workflow 保存和导出 |
+| 不保存画布坐标和连线 | 保存位置、连线和输入绑定 |
+| 不保存 Workflow 运行状态 | 保存节点状态、耗时、日志和运行参数引用 |
+| 发布后供下次复制 | 修改不回写来源模板 |
+
+模板拖入画布是复制，不是引用：
+
+```text
+模板 A
+  └── 深拷贝 → 画布工具 A'
+
+之后：
+修改模板 A   ≠ 修改画布工具 A'
+修改画布 A'  ≠ 修改模板 A
+```
+
+## 6. 四类工具的职责与执行自由度
+
+### 6.1 HTTP
+
+HTTP 工具支持两种使用方式：
+
+```text
+配置模式
+  Method / URL / Headers / Params / Body / 超时等
+  由系统标准 HTTP 执行器执行
+
+代码模式
+  使用 main.py 完整接管特殊 HTTP 调用
+  通过现有或新版通用 Worker 执行
+```
+
+已确认：
+
+- 标准场景优先使用可视化配置。
+- 特殊场景允许使用完整 Python。
+- HTTP 的 `main.py` 可选。
+
+尚未确认：
+
+- 配置模式和代码模式是否通过分段控件切换。
+- 切换时是否永久保留另一模式的内容。
+- 配置模式如何引用上游输入和凭据。
+- HTTP 代码模式已确认使用统一的 `inputs / config / response` Worker 契约。
+
+### 6.2 LLM
+
+LLM 不采用需要平台持续适配供应商的封闭原生执行器。
+
+已确认：
+
+- LLM 必须包含可完整编辑的 `main.py`。
+- 用户可以修改 Client、SDK、Base URL、请求头、模型参数、推理模式、流式处理、结构化输出和响应解析。
+- 模板只提供面向“一次模型调用”的默认代码结构，不限制用户最终代码能力。
+- 平台不负责维护覆盖所有模型厂商的深度适配层。
+
+### 6.3 Agent
+
+已确认：
+
+- Agent 必须包含可完整编辑的 `main.py`。
+- 默认模板面向多步决策、Tool Calling、Middleware、状态、上下文和多轮执行。
+- 允许继续使用 Python 硬编码处理供应商差异和特殊 Agent 逻辑。
+- 平台不尝试把所有 Agent 行为抽象成固定表单或插件协议。
+
+### 6.4 Script
+
+已确认：
+
+- Script 必须包含可完整编辑的 `main.py`。
+- Script 用于通用 Python 数据处理、转换、校验和聚合等场景。
+- 新版协议需决定是否支持 `${...}`；旧 Script 行为不再构成兼容约束。
+
+### 6.5 LLM 与 Agent 只做语义分类
+
+LLM 与 Agent 的区别用于：
+
+- 模板分类。
+- 默认代码结构。
+- 编辑器布局。
+- 用户意图表达。
+- 后续统计和筛选。
+
+已确认不做运行时强制限制：
+
+- LLM Python 可以调用工具。
+- Agent Python 可以只执行一次模型调用。
+- 平台不通过静态扫描或沙箱规则强制两者能力边界。
+- 两类代码都在受控 Worker 进程边界内执行，但用户 Python 本身保持高自由度。
+
+## 7. 结构化定义的目标边界
+
+`definition.json` 的目的不是封装所有供应商，而是让模板和画布能够描述、校验和渲染工具。
+
+目标职责：
+
+```text
+definition.json
+├── 输入字段或端口
+├── 输出字段或端口
+├── 普通配置项
+├── 凭据要求
+├── 类型专属配置
+├── 测试输入示例
+└── 输出示例或结构说明
+
+main.py
+└── 真正的自定义执行逻辑
+```
+
+尚未确认的协议细节：
+
+- 输入输出使用简化字段表还是完整 JSON Schema。
+- 输入类型集合和嵌套对象表达方式。
+- 必填、默认值、说明、固定值、上游映射和全局变量如何区分。
+- 多输出端口与单一 JSON `response` 如何兼容。
+- 模板测试输入是否属于 `definition.json`。
+- HTTP 配置与 Python 代码之间的数据传递格式。
+- LLM / Agent 的普通配置是否继续使用 6 个固定模板参数，或改用结构化配置对象。
+
+在这些字段确认前，不得直接扩展现有 `ToolManifest`。
+
+## 8. 画布工具生命周期
+
+### 8.1 创建
+
+目标入口：
+
+```text
+新增 HTTP / LLM / AGENT / SCRIPT
+        ↓
+选择空白定义或工具模板
+        ↓
+深拷贝为画布独立工具
+```
+
+空白定义必须提供可理解的最小起始内容，尤其是 LLM、Agent 和 Script 的完整示例代码。
+
+### 8.2 编辑
+
+- 画布工具的代码和配置可以直接修改。
+- 修改只影响当前 Workflow。
+- 不提供“升级来源模板”“同步模板修改”或“分离副本”，因为深拷贝后本来就没有引用关系。
+- 复制粘贴节点必须继续深拷贝工具定义和选区内部连线。
+
+### 8.3 发布
+
+发布的业务含义：从当前画布工具提取可复用部分，创建一个新的独立模板。
+
+当前已落地的发布内容：
+
+- 名称、说明和类型。
+- `manifest.json` 身份及格式信息。
+- `definition.json` 输入输出和类型配置。
+- `main.py` 完整代码（适用类型）。
+- 安全默认值和测试示例。
+
+不得发布的 Workflow 实例信息：
+
+- 画布坐标、尺寸和连线。
+- 上游节点 ID、下游节点 ID和当前 Workflow 专属映射。
+- 节点运行状态、执行耗时、日志和运行历史。
+- 当前 Workflow 名称、Run、Case、Attempt、Artifact 数据。
+- 已确认不得发布的真实 API Key。
+
+发布始终由后端生成新模板 ID，不覆盖同 ID；同名模板允许并按各自 ID 展示。发布完成后不向画布节点写回模板引用。
+
+### 8.4 删除
+
+- 删除模板不影响已经复制到新版 Workflow 的画布工具。
+- 删除画布工具不影响模板库。
+- 旧仓储和旧 Workflow 引用规则整体删除，不进入新版生命周期。
+
+## 9. 导入、导出与可移植性
+
+### 9.1 模板包
+
+- 四类模板使用同一包格式和格式版本。
+- LLM、Agent、Script 包含 `main.py`。
+- HTTP 配置模板可以没有 `main.py`；HTTP 代码模板包含 `main.py`。
+- 导入后模板进入同一个工具模板库并可独立测试。
+- 旧 Script / Agent ZIP 不兼容，并通过专项测试确认被明确拒绝且不会产生部分写入。
+
+### 9.2 Workflow 包
+
+- 新版 Workflow 导出包含全部画布工具定义和图结构。
+- 导入目标环境不需要预先安装来源模板。
+- 导入后不建立对来源模板 ID 的运行时引用。
+- Workflow 是否复用模板包目录结构、是否将工具按节点逐个内嵌、如何处理重复工具定义，尚待协议设计。
+
+### 9.3 凭据
+
+- 从画布发布模板时移除真实 API Key，这是已确认规则。
+- n8n 等项目采用凭据 Stub 和导入后重新绑定；该模式可作为参考，但尚未被确认成 Agent Bench 的最终方案。
+- 新版 Workflow 导出是否保留明文密钥、改为凭据声明或要求导入后绑定，仍需单独确认。
+- 当前新模板 ZIP 不会自动清理 `config` 或 `main.py` 中的全部秘密，页面导出前必须保留可信接收者警告；凭据规则确认前不得宣称可安全公开分享。
+
+## 10. 当前 Studio UI 基线（不得回归）
+
+以下是 T13.1 已完成并在后续布局中需要保留的行为：
+
+- `Start / End` 为系统节点；可新增工具类型为 `HTTP / AGENT / LLM / SCRIPT`。
+- 所有画布节点卡片右上角只保留运行按钮。
+- 节点状态统一为 `PENDING / RUNNING / PASSED / FAILED`。
+- 节点右下角显示加载圆环和本次执行耗时。
+- 每次执行从 `0ms` 重新计时，`RUNNING` 期间累加，结束后固定本次耗时。
+- 加载圆环只在 `RUNNING` 状态旋转。
+- `FAILED` 已有状态和样式能力；T13.1 不随机制造失败。
+- 单击节点只选中，双击打开可移动、八向拉伸的节点编辑器。
+- 节点编辑器标题栏保留运行、保存和关闭。
+- 参数通过独立“参数”页签查看，标题栏不提供参数快捷按钮。
+- 参数页按 `source / name / data` 展示只读实际运行参数；大数据使用摘要、详情或 Artifact。
+- 画布右上角保留运行、全局变量和保存。
+- Ctrl 多选、框选、复制粘贴、Delete / Backspace、Undo / Redo 和 Dagre 自动布局继续有效。
+- 系统只支持桌面浏览器，不增加移动端设计或测试。
+
+四类工具的编辑器详细信息架构尚未确认。不得因为类型统一进入模板库而强行使用同一编辑表单。
+
+### 10.1 当前落地状态
+
+- 成功状态已在源码、专项测试、前端构建产物、`AGENTS.md` 和 `docs/enterprise-agent-test-orchestration.md` 中统一为 `PASSED`。
+- 桌面浏览器已验证节点从 `PENDING` 进入 `RUNNING` 后结束为 `PASSED`；失败能力继续使用 `FAILED`。
+
+## 11. 行业调研结论与适用范围
+
+调研项目：n8n、Node-RED、Dify、Langflow、Apache NiFi。
+
+### 11.1 可借鉴内容
+
+- n8n：社区节点包注册节点类型，Workflow 实例保存类型、版本、参数、凭据引用和位置；新 n8n Package 使用凭据 Stub，而不是导出秘密。
+- Node-RED：节点包可携带 example flows；Subflow 是可复用定义，实例保存每次使用的属性。
+- Dify：Tool Plugin 将 provider、tool 参数、输出 Schema、代码和凭据声明分层，工具安装后可直接作为 Workflow 节点使用。
+- Langflow：组件类声明输入输出和类型，编辑器据此生成端口和校验连接。
+- Apache NiFi：版本化 Flow 与本地 Process Group 分离，支持改变版本和停止版本控制。
+
+### 11.2 不直接照搬的内容
+
+- Agent Bench 当前不采用 n8n / NiFi 的长期引用和版本升级模型。
+- Langflow 的 `replacement` 只是显式推荐并过滤候选组件，不会自动迁移配置和连线。
+- 不根据字段名称和类型自动推断任意两个工具可以无损替换。
+- 不建设需要持续团队维护的统一模型供应商插件层。
+- 不把设计工具中的 Detach / Variant 概念引入当前深拷贝模型；模板复制后天然独立。
+
+### 11.3 参考资料
+
+- n8n 节点示例：<https://github.com/n8n-io/n8n-nodes-starter/blob/master/nodes/Example/Example.node.ts>
+- n8n 节点标准参数：<https://docs.n8n.io/connect/create-nodes/build-your-node/reference/base-files/standard-parameters/>
+- n8n Packages：<https://docs.n8n.io/build/manage-workflows/export-and-import/n8n-packages/>
+- Node-RED 节点打包：<https://nodered.org/docs/creating-nodes/packaging>
+- Node-RED Example Flows：<https://nodered.org/docs/creating-nodes/examples>
+- Node-RED Subflows：<https://nodered.org/docs/user-guide/editor/workspace/subflows>
+- Dify Tool Plugin：<https://docs.dify.ai/en/develop-plugin/dev-guides-and-walkthroughs/tool-plugin>
+- Langflow 自定义组件：<https://docs.langflow.org/components-custom-components>
+- Langflow replacement 源码：<https://github.com/langflow-ai/langflow/blob/main/src/frontend/src/CustomNodes/GenericNode/components/NodeLegacyComponent/index.tsx>
+- Apache NiFi Versioning：<https://nifi.apache.org/docs/nifi-docs/html/user-guide.html#versioning_dataflow>
+
+## 12. 端到端目标流程
+
+### 12.1 从模板创建工具
+
+```text
+进入 Workflow Studio
+  → 添加 HTTP / LLM / AGENT / SCRIPT
+  → 选择空白定义或工具模板
+  → 系统深拷贝模板
+  → 用户修改少量代码或配置
+  → 配置输入输出与连线
+  → 保存 Workflow
+  → 创建 Run 时冻结画布工具完整快照
+  → 执行、追溯和恢复
+```
+
+### 12.2 从画布发布模板
+
+```text
+在画布完成工具配置和测试
+  → 点击“发布为模板”
+  → 系统提取可复用定义
+  → 移除真实 API Key 和实例运行数据
+  → 用户确认模板名称、说明和测试示例
+  → 在模板库创建独立模板
+  → 原画布工具保持不变
+```
+
+### 12.3 模板跨用户复用
+
+```text
+用户 A 导出模板包
+  → 用户 B 导入模板包
+  → 在模板库独立测试
+  → 复制到用户 B 的画布
+  → 绑定本机凭据并个性化
+  → 保存为自包含 Workflow
+```
+
+## 13. 可独立验证的开发子任务
+
+每个子任务必须在验证通过后才能进入依赖任务。任何失败都暂停下游任务并记录结果。
+
+| ID | 目标 | 输入 | 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|---|
+| T13.2.1 | 冻结新版术语、所有权和未决业务规则 | 本计划、现有 T13.1 原型 | 经用户确认的数据契约决策记录 | 逐项需求评审；确认所有开放问题有明确结论 | T13.1 |
+| T13.2.2 | 定义四类模板和画布内嵌工具模型 | T13.2.1 | Pydantic 模型、格式版本、类型判别联合、迁移边界 | 模型单测覆盖四类型、非法额外字段、JSON 严格性和往返序列化 | T13.2.1 |
+| T13.2.3 | 重建模板仓储和包格式 | T13.2.2、空 `tool_registry/` | 四类型 CRUD、刷新、导入、导出；拒绝旧 ZIP | 仓储和 ZIP 单测；路径穿越、重复 ID、无效包、旧包拒绝且无部分写入 | T13.2.2 |
+| T13.2.4 | 实现模板独立测试 | T13.2.2、现有 Worker / SSE | 四类型测试启动、中断、日志、结果协议 | 每类型成功、失败、超时、中断、非法 JSON 和日志上限测试 | T13.2.2、T13.2.3 |
+| T13.2.5 | 实现画布工具深拷贝与空白创建 | T13.2.2、T13.1 画布 | 四类型内嵌定义、来源模板深拷贝、复制粘贴保持 | 前端状态测试和真实浏览器 E2E；修改模板/节点互不影响 | T13.2.2、T13.2.3 |
+| T13.2.6 | 实现从画布发布模板 | T13.2.3、T13.2.5 | 发布提取、实例字段剥离、API Key 清除、新模板创建 | 发布前后深比较；密钥扫描；模板独立运行；原节点不变 | T13.2.3-T13.2.5 |
+| T13.2.7 | 设计并实现新版 Workflow 持久化 | T13.2.2、T13.2.5 | 图结构、内嵌工具、事务保存、更新、删除和校验 | Repository 重启回读、并发更新、无效边/节点/定义拒绝 | T13.2.2、T13.2.5 |
+| T13.2.8 | 实现四类工具执行器 | T13.2.4、T13.2.7 | HTTP 配置/代码、LLM Python、AGENT Python、SCRIPT Python 执行 | 每类型真实子进程/HTTP 测试；inputs、config、response、日志、取消和超时 | T13.2.4、T13.2.7 |
+| T13.2.9 | 接入 Run 快照和 DAG 调度 | T13.2.7、T13.2.8 | 新版 Workflow 快照、节点状态、依赖调度、Artifact 追溯 | 单链、分支、汇合、失败、取消、恢复、快照不变性测试 | T13.2.7、T13.2.8 |
+| T13.2.10 | 完成四类节点编辑器布局 | 已确认类型协议、T13.1 UI 基线 | HTTP / LLM / Agent / Script 类型化编辑器 | 1440x900 浏览器 E2E；无溢出/重叠；代码和配置完整保存 | T13.2.5、T13.2.8 |
+| T13.2.11 | 完成模板与 Workflow 导入导出 | T13.2.3、T13.2.7、凭据规则 | 跨环境模板包和自包含 Workflow 包 | A 环境导出、B 环境导入、无来源模板恢复、凭据缺失提示 | T13.2.3、T13.2.7 |
+| T13.2.12 | 完整回归和文档收口 | 全部前序任务 | E2E 报告、迁移说明、风险清单、权威文档更新 | 单测、静态检查、构建、桌面完整流程和受影响模块全量回归 | T13.2.1-T13.2.11 |
+
+## 14. 总体验收标准与价值验证（How to Measure）
+
+### 14.1 模板独立性
+
+- 从任意模板创建画布工具后，修改或删除模板不改变画布工具。
+- 修改画布工具不改变模板。
+- 新版 Workflow 在没有来源模板的环境中仍能恢复完整定义。
+
+### 14.2 新手效率
+
+- 新手可从四类完整模板创建节点，不需要从空文件编写完整代码。
+- 模板复制后只修改少量代码或配置即可完成最小可运行流程。
+- 模板库独立测试能够在进入 Workflow 前发现缺包、配置和执行错误。
+
+### 14.3 发布复用
+
+- 画布工具可以发布为独立模板。
+- 发布不改变当前节点和任何已有模板。
+- 新模板可独立测试、导出、导入并再次复制到画布。
+
+### 14.4 安全
+
+- 发布模板包不包含真实 API Key。
+- 测试、日志、错误和 Artifact 不意外写入模板包。
+- 文件导入导出继续受 `tool_registry/` 路径边界和 ZIP 安全校验约束。
+
+### 14.5 执行与追溯
+
+- LLM、Agent、Script 的完整 Python 在独立子进程执行。
+- HTTP 配置模式和 Python 模式均可追踪输入、输出、日志、耗时和错误。
+- Run 创建后冻结 Workflow 和全部内嵌工具，后续编辑不影响历史 Run。
+- 节点状态和耗时遵守 `PENDING → RUNNING → PASSED / FAILED` 展示规则。
+
+### 14.6 不兼容替换边界
+
+- 旧固定 Workflow/Run 页面、API 和执行链不可访问且不再出现在导航中。
+- 旧 Script / Agent 工具 CRUD、SSE、ZIP 和小写类型协议不可访问。
+- 新工具模板只接受并输出 `HTTP / AGENT / LLM / SCRIPT`，不存在旧协议兼容层。
+- 测试集、Target、FAQ、主题和新版 Workflow Studio 等保留功能不得因删除旧链路回归。
+
+## 15. 已知风险
+
+- 深拷贝会产生代码重复；模板修复不会自动传播到已有 Workflow。
+- 没有模板引用后，无法统计哪些 Workflow 源自某个模板。
+- 任意 Python 使 LLM / Agent 分类无法成为安全边界。
+- 用户代码可能硬编码密钥，单纯清空结构化 API Key 字段不足以保证发布包无秘密。
+- HTTP 双模式会带来配置与代码的优先级、切换和回显复杂度。
+- 不兼容删除会使旧工具包、旧 Workflow 和历史 Run 无法恢复，这是用户已确认接受的永久数据损失。
+- 自包含 Workflow 包可能显著增大，重复节点代码需要确定去重策略。
+- 新版任意 DAG 的执行、取消、恢复和 Artifact 传播不能直接套用旧固定拓扑。
+- 缺少成熟插件生态意味着依赖兼容和第三方 SDK 仍需人工维护 `pyproject.toml`。
+
+## 16. 实现前仍需确认的开放问题
+
+以下问题没有得到用户确认，不得自行补全：
+
+1. HTTP CONFIG 的上游字段引用、动态 URL/Header/Body 映射和在 Workflow 中的标准 `response` 使用规则。
+2. 除 API Key 外，Authorization、Cookie、Token 和代码硬编码秘密的处理范围。
+3. 新版 Workflow 导出时的凭据保存、Stub 和导入后绑定规则。
+4. 新版 Workflow 图结构、端口、分支、汇合、循环和失败传播规则。
+5. 四类节点编辑器下一阶段的字段分组、标签页和默认展开状态。
+6. 从导入模板替换已有画布节点时，是否需要保留位置、连线和输入绑定；当前只有新增深拷贝，没有自动替换协议。
+
+## 17. 执行纪律
+
+- 每次只实现一个可独立验证的子任务。
+- 子任务开始前重新检查本计划、权威编排文档和当前 Git 差异。
+- 每个子任务必须明确目标、输入、输出、验证方法和依赖。
+- 验证失败时停止所有依赖任务，不得继续堆叠实现。
+- 每完成一个子任务立即记录测试命令、结果、未覆盖范围和已知风险。
+- 开发完成后必须运行相关单元测试、静态检查、完整构建、桌面 E2E 和受影响模块全量回归。
+- 不覆盖或回滚与当前任务无关的用户改动。
+
+## 18. 当前工作区与验证基线（2026-07-20）
+
+### 18.1 已落地的 T13.1 原型能力
+
+- Workflow 管理页可进入独立全屏 React Flow Studio；当前保存、测试运行、参数数据和节点运行状态均为前端本地演示，不调用旧 Workflow API，不能用于实际 Run。
+- 画布支持节点拖动、连线、Dagre 自动布局、Edge `+` 插入、空白区与节点右键菜单、小地图和测试运行演示。
+- 图结构历史最多保留 50 步；支持 `Ctrl+Z`、`Ctrl+Shift+Z`、`Ctrl+Y`、Ctrl 多选、框选、复制粘贴内部连线和 Delete / Backspace 删除。
+- 双击节点打开默认 `1064x814`、可移动、八向缩放的编辑器；编辑器包含设置、参数和节点日志，普通字段每行两个，输出变量可动态增删。
+- 节点卡片右上角只保留运行按钮；参数入口保留在编辑器“参数”页签，按 `source / name / data` 展示只读运行参数，大数据预留摘要、详情和 Artifact 入口。
+- 节点右下角已显示加载圆环和本次执行耗时；每次运行从 `0ms` 开始，`RUNNING` 期间持续累加，完成后冻结，圆环仅在执行中旋转。
+- HTTP 编辑器已有 Method、URL、Headers、Params、Body、cURL 导入、JSON Beautify 和 Binary 文件等前端配置能力；这些字段尚未形成新版后端执行协议。
+
+### 18.2 当前修改和新增文件
+
+工作区存在未提交修改，其中可能包含用户在本任务前或并行完成的改动。后续不得假定全部差异属于 T13.2，也不得回滚无关内容。
+
+- `PLAN.md`：T13.2 业务分析、已确认决策、行业调研、开发拆解、验收标准、风险和开放问题。
+- `web/frontend/workflow-canvas.jsx`：React Flow Studio 源码、节点编辑器、HTTP 配置、前端状态和执行耗时演示。
+- `web/frontend/workflow-canvas.css`：Studio、节点、编辑器、参数表、耗时圆环和上下文菜单的桌面样式。
+- `web/static/assets/workflow-canvas.js`：由 `npm run build:workflow` 生成的 JavaScript 构建产物，禁止绕过源文件直接修改。
+- `web/static/assets/workflow-canvas.css`：Studio 静态样式资源。
+- `tests/test_execution_frontend.py`：Studio 资源注册、画布交互、编辑器、HTTP、参数、状态和耗时的前端专项回归。
+- `package.json`、`package-lock.json`：React、React Flow、Dagre、Lucide、react-rnd、cURL 解析和 `build:workflow` 构建依赖。
+- `web/static/execution.js`、`web/static/execution.css`：Workflow 管理入口、Studio 挂载逻辑和管理页样式。
+- `web/static/index.html`：Studio JavaScript/CSS 资源注册和 Workflow 导航文案。
+- `docs/enterprise-agent-test-orchestration.md`：T13.1 状态、验证记录、当前限制和旧编排边界。
+- `AGENTS.md`：项目当前进度、Studio 基线和 `PASSED` 成功状态。
+
+### 18.3 最近一次已记录验证
+
+- Studio 专项：`uv run pytest tests/test_execution_frontend.py -q`，结果 `8 passed, 1 warning`。
+- 前端构建：`npm run build` 成功；构建脚本依次执行 `build:editor` 和 `build:workflow`。
+- 静态检查：`node --check` 和 `git diff --check` 通过。
+- 桌面浏览器 E2E：在 `1440x900` 下验证拖动、菜单、编辑器缩放、参数页、HTTP 配置和状态演示；页面横向溢出为 0，浏览器控制台错误为 0。
+- 全量回归：`uv run pytest -q`，结果 `295 passed, 7 skipped, 1 warning`。
+- 7 个跳过项包括 6 个缺少供应商凭据的 Agent live 矩阵和 1 个 Windows 符号链接权限测试；warning 为既有 Starlette/httpx 弃用提示。
+- 真实模型历史矩阵已覆盖 DeepSeek `deepseek-v4-pro` 和 DashScope `qwen3.7-max`；真实内网 FastAPI 联调仍未完成，不得宣称真实环境全链路通过。
+- 上述结果是最近一次已记录基线；后续改动不能仅引用旧结果，必须重新执行受影响验证。
+
+> 基线更新：上述 `295 passed` 是删除旧 Workflow/Run 链路前的历史结果。Step 2 删除对应实现和测试后，当前剩余测试基线更新为 `153 passed, 6 skipped, 1 warning`，详见第 21 节。
+
+## 19. 下一步具体执行计划
+
+### 19.1 当前已完成批次
+
+- 旧工具与旧 Workflow/Run 不兼容删除。
+- 四类大写模板模型、仓储、CRUD、安全 ZIP、独立测试和统一执行 Worker。
+- 工具模板页面、画布深拷贝、节点代码映射和发布为独立新模板。
+- `definition.json` 使用简化字段列表；HTTP 使用 `CONFIG / CODE` 并只执行当前模式；测试 inputs 和日志不持久化。
+
+### 19.2 下一批必须确认的三个问题
+
+1. 新版 Workflow 是否禁止循环，以及分支、汇合和多入边节点的执行条件。
+2. 节点端口和边是否只表达控制流，还是同时携带命名数据映射。
+3. 节点失败、超时或中断后，下游是全部跳过、按边策略继续，还是允许节点级容错配置。
+
+在这三项确认前不得建立 Workflow 持久化模型或 DAG 调度器，因为它们会直接决定图 Schema、校验规则、运行快照和恢复语义。
+
+### 19.3 当前验证基线
+
+- `npm run build`、Python `py_compile`、JavaScript `node --check` 和 `git diff --check` 通过。
+- `uv run pytest -q`：`106 passed, 1 warning`。
+- 桌面浏览器覆盖模板 CRUD/ZIP 回读、独立运行成功/中断、模板深拷贝和画布发布；临时模板均已清理。
+
+### 19.4 后续依赖顺序
+
+严格按以下顺序推进，不跨越未验证依赖：
+
+```text
+T13.2.1-T13.2.6 已完成
+  → T13.2.7 Workflow 持久化
+  → T13.2.8 四类执行器（模板独立执行部分已提前完成）
+  → T13.2.9 DAG 调度、Run 快照与追溯
+  → T13.2.10 四类节点编辑器
+  → T13.2.11 模板与 Workflow 导入导出
+  → T13.2.12 全量回归、迁移说明和文档收口
+```
+
+每项完成后立即执行第 13 节定义的验证并记录命令、结果、未覆盖范围和风险。最终必须覆盖模型单测、仓储与 ZIP 安全、真实子进程和 HTTP、Repository 重启回读、DAG 单链/分支/汇合/失败/取消/恢复、Run 快照不变性、桌面 `1440x900` E2E、前端完整构建、静态检查和全量 pytest 回归。
+
+## 20. 持续有效的项目约束
+
+- `docs/enterprise-agent-test-orchestration.md` 只作为已完成旧实现的历史记录；其中要求保留旧 Workflow/Run/工具链路的内容已被用户最新决策覆盖。
+- 新版 Studio 不得直接复用旧 `WorkflowDefinition`、旧 Run 快照或旧工具协议作为任意 DAG 协议。
+- 系统只支持桌面浏览器；不得增加移动端断点、触控专用逻辑或移动端回归测试。
+- 不恢复旧评测流水线、`inputs/.tools.json` 或工具 `tags` 逻辑。
+- Excel 文件操作限制在 `inputs/`，工具文件操作限制在 `tool_registry/`；导入导出必须继续执行路径穿越和 ZIP 安全校验。
+- `config.yaml` 只保存当前 Excel 和 Sheet，不得保存业务配置、编排进度或凭据。
+- API Key 只可注入测试或运行进程，不得写入代码、测试、文档或提交内容；旧工具 ZIP 明文密钥导出行为随旧链路删除。
+- 用户代码继续使用当前 `.venv`，不自动安装依赖；缺包时人工修改 `pyproject.toml` 后执行 `uv sync`，禁止在编辑器用户代码中调用 `pip` 或 `uv`。
+- 工作区可能包含用户未提交改动；后续修改必须先检查差异，不覆盖或回滚与当前子任务无关的内容。
+
+## 21. 分步执行记录
+
+### Step 1：永久删除旧本机工具数据（completed，2026-07-20）
+
+- 目标：在不建立兼容层的前提下清空旧 Script / Agent 工具数据，为四类大写工具模板重建空仓储。
+- 输入：`tool_registry/` 下 6 个旧 UUID 工具目录；用户明确选择 `1A` 永久删除且不备份。
+- 输出：6 个一级工具目录及其中旧 `manifest.json + main.py` 已永久删除；`tool_registry/` 根目录和 `.gitkeep` 保留。
+- 路径安全：删除前解析 `tool_registry/` 绝对路径，并逐项校验所有删除目标的父目录严格等于该根目录；未对工作区其他路径执行删除。
+- 验证：删除命令退出码为 0；删除后 `Get-ChildItem -Force tool_registry` 只返回 `.gitkeep`。
+- 依赖结论：Step 1 已通过，可以开始 Step 2 拆除旧固定 Workflow/Run 页面、API 注册和执行链。
+
+### Step 2：拆除旧固定 Workflow/Run 页面、API 和执行链（completed，2026-07-20）
+
+- 目标：彻底移除旧固定拓扑 Workflow、旧 Run 中心及其后端执行链，同时保留测试集、Target、新版 Workflow Studio、工具模板入口和 FAQ。
+- 前端输出：侧栏删除“运行中心”；`web/static/execution.js` 重建为仅包含 Target CRUD 和前端本地 Workflow Studio，不再包含旧 Run、固定 Workflow 编辑器、测试集绑定或旧 API 请求。
+- API 输出：FastAPI 不再注册 `web/routes_workflows.py` 和 `web/routes_runs.py`；`GET /api/workflows` 与 `GET /api/runs` 均返回 404。
+- 后端删除：删除旧 `routes_workflows.py`、`routes_runs.py`、`run_events.py`，以及旧 Artifact、Connector、Preparation、Workflow、Case Executor、Scheduler、Results、Run Repository 和 Run Models 模块。
+- Target 保留：新增 `execution/targets.py`，以独立 `TargetRepository` 管理现有 `targets` 表；旧 Workflow/Run 表即使仍存在于本机 SQLite，也不再被程序读取或通过 API 暴露。
+- 测试清理：删除只验证旧 Artifact、Connector、Run Repository、Preparation、固定 Workflow、Case Executor、Scheduler、Run API 和 Run Events 的测试；Target 测试改为验证独立仓储初始化、重启回读和 CRUD。
+- 专项验证：`uv run pytest tests/test_targets.py tests/test_execution_frontend.py tests/test_web_app.py -q`，结果 `37 passed, 1 warning`。
+- 静态验证：保留 Python 文件通过 `py_compile`；`node --check web/static/execution.js` 和 `git diff --check` 通过。
+- 引用验证：在 `web/` 和 `execution/` 生产源码中扫描 `/api/runs`、`/api/workflows`、旧路由、`RunRepository`、`RunScheduler`、`WorkflowService` 和 `CaseWorkflowExecutor`，结果为零命中。
+- 全量回归：`uv run pytest -q`，结果 `153 passed, 6 skipped, 1 warning`，耗时 11.41 秒；6 个跳过项为未注入真实模型凭据的 live 测试，warning 仍为既有 Starlette/httpx 弃用提示。
+- 依赖结论：Step 2 已通过；下一步必须先确认 `definition.json`、HTTP 双模式和凭据规则，再建立四类大写工具模板模型。
+
+### Step 3：冻结首批新模板协议（completed，2026-07-20）
+
+- `definition.json`：选择简化字段列表，不实现完整 JSON Schema。输入输出字段使用 `name / type / required / description / example`；复杂对象在当前迭代统一声明为 `JSON`。
+- HTTP 双模式：使用大写 `CONFIG / CODE` 作为明确执行模式；切换时保留配置和代码两边内容，但运行时只执行当前模式。
+- Python 数据协议：继续遵守已确认的 `inputs / config / response`；`inputs` 是动态上游数据，`config` 是节点持久配置，`response` 是本次标准 JSON 输出。
+- 凭据决策：独立凭据仓储、凭据槽、Workflow 默认绑定、节点覆盖、运行时秘密解析和导入后重新绑定全部延后，写入待优化清单，不阻塞当前快速迭代。
+- 当前迭代边界：新模板模型不增加 `credential_id`、凭据仓储表或绑定 API/UI；`config` 保持通用 JSON。不得因此宣称模板导出已具备完整秘密保护能力。
+- 安全风险：用户仍可能把 API Key、Authorization、Cookie、Token 或密码写入 `config` 或 `main.py`。发布/导出前的已知字段清理、代码秘密扫描和日志脱敏仍未实现，相关功能完成前不得宣称模板包可安全公开分享。
+- 验证：逐项对照用户选择 `1A / 2A` 和“凭据功能待优化、当前跳过”的最新决定，本计划已移除凭据功能对 T13.2.2/T13.2.3 的阻塞依赖；`git diff --check -- PLAN.md` 必须通过。
+- 依赖结论：Step 3 已完成，可以开始 Step 4 建立四类大写工具模板模型和空仓储。
+
+### Step 4：建立四类大写工具模板模型、仓储和 CRUD API（completed，2026-07-20）
+
+- 目标：在空 `tool_registry/` 上建立不兼容旧协议的四类工具模板数据层，为后续前端、导入导出、独立测试和画布深拷贝提供唯一事实模型。
+- 模块替换：删除旧 `web/tool_registry.py` 和 `web/routes_tools.py`；新增 `web/tool_templates.py` 和 `web/routes_tool_templates.py`。
+- API：新入口为 `/api/tool-templates`；旧 `/api/tools` 不再注册并返回 404。
+- 类型：`manifest.json`、`definition.json` 和 API 只接受 `HTTP / AGENT / LLM / SCRIPT`；小写 `http / agent / llm / script` 由 Pydantic 直接拒绝，不做规范化。
+- 包结构：每个模板目录必须包含 `manifest.json + definition.json`；AGENT、LLM、SCRIPT 必须包含 `main.py`；HTTP `CONFIG` 模式可无 `main.py`，HTTP `CODE` 模式必须包含。
+- 简化字段：输入输出使用 `name / type / required / description / example`，字段类型当前限定为 `STRING / NUMBER / INTEGER / BOOLEAN / JSON`；重复字段名和非法 JSON example 被拒绝。
+- 通用配置：`definition.config` 保存严格 JSON 对象；当前不包含凭据引用或绑定字段。
+- HTTP：`execution_mode` 只接受 `CONFIG / CODE`；配置结构包含 Method、URL、Headers、Params、Body Type 和 Body；从 CODE 切回 CONFIG 时已保存的 `main.py` 继续保留。
+- 仓储：支持显式刷新、列表、读取、创建、整体更新和删除；模板 ID 与目录名一致，ID 和类型创建后不可修改，同 ID 拒绝覆盖。
+- 不兼容验证：旧目录只有 `manifest.json + main.py` 时刷新结果明确报告“缺少 definition.json”，不会加载到有效快照；旧 `/api/tools` 返回 404。
+- 测试清理：删除旧工具迁移、旧小写类型、六参数 Agent、旧 `/api/tools`、旧 SSE、旧 ZIP 和旧真实模型工具矩阵测试，新增 `tests/test_tool_templates.py`。
+- 专项验证：`uv run pytest tests/test_tool_templates.py -q`，结果 `11 passed, 1 warning`。
+- 静态验证：`web/tool_templates.py`、`web/routes_tool_templates.py`、`web/app.py` 通过 `py_compile`；`git diff --check` 通过。
+- 未覆盖：本步未实现 ZIP 导入导出、模板独立执行、SSE/中断、工具模板前端、画布深拷贝、发布模板和凭据保护，不得把 CRUD 通过解释为完整模板流程通过。
+- 依赖结论：Step 4 已通过，可以进入 Step 5 工具模板前端和画布深拷贝；独立执行需要在后续执行器子任务单独验证。
+
+### Step 5：工具模板前端、画布深拷贝和大写状态统一（completed，2026-07-20）
+
+- 目标：提供四类大写工具模板的桌面管理入口，并验证模板复制到画布后成为不依赖来源模板的完整节点副本。
+- 前端输出：一级导航改为“工具模板”，提供 `HTTP / AGENT / LLM / SCRIPT` 大写类型创建、筛选、编辑和删除；旧运行中心入口已移除。
+- 画布输出：Studio 顶部新增工具模板面板，从 `/api/tool-templates` 加载模板；选择模板时深拷贝 `definition` 和 `main_py`，节点不保存来源模板 ID。
+- 节点协议：节点类型统一为 `START / HTTP / AGENT / LLM / SCRIPT / END`；运行状态统一为 `PENDING / RUNNING / PASSED / FAILED`。
+- 代码编辑：真实浏览器首次验证发现模板 `main.py` 虽已进入节点对象，但编辑器仍显示旧默认代码；现已改为受控读取和写回节点 `mainPy`，空白 Python 节点默认使用 `response = inputs`，符合 `inputs / config / response` 新协议。
+- 独立性验证：通过 UI 创建并保存一个临时 AGENT 模板，复制到画布后确认名称、说明和 `main.py` 正确；在画布中把代码修改为节点专属内容并保存，再通过新 API 删除仓库模板。删除后模板面板显示为空，但画布节点、专属代码和已保存状态仍保留，证明没有运行时来源引用。
+- 状态与耗时 E2E：临时画布节点从 `PENDING` 经运行后进入 `PASSED`，耗时从 `0ms` 累加并在完成后冻结为本次实测的 `907ms`；节点右上角只有运行按钮。桌面视口为 `1440x900`，页面横向溢出为 `0px`，截图未发现控件重叠或文本越界。
+- 数据清理：E2E 临时模板已通过 `DELETE /api/tool-templates/{id}` 删除；`tool_registry/` 已恢复为只包含 `.gitkeep`。
+- 专项验证：`uv run pytest tests/test_tool_templates.py tests/test_tool_templates_frontend.py tests/test_execution_frontend.py tests/test_targets.py tests/test_web_app.py -q`，结果 `51 passed, 1 warning`。
+- 构建与静态验证：`npm run build` 成功；`node --check` 覆盖 `app.js`、`tool-templates.js`、`execution.js` 和 Workflow bundle；`git diff --check` 通过。
+- 全量回归：`uv run pytest -q`，结果 `85 passed, 1 warning`；warning 为既有 Starlette/httpx 弃用提示。旧真实模型测试已随不兼容旧工具执行协议删除，因此本轮没有 live 跳过项，也不得用本结果宣称新执行器已通过真实模型验证。
+- 未覆盖：模板 ZIP 导入导出、模板独立执行、SSE/中断、HTTP CONFIG 执行器、Workflow 持久化、画布发布模板和凭据保护均尚未实现。`web/static/app.js` 中仍有不可达的旧工具管理前端代码，旧 Worker 模块当前也未通过 API 暴露；应在对应替换步骤删除，不能把不可达解释为兼容支持。
+- 依赖结论：Step 5 已通过，可以进入 Step 6 四类工具模板 ZIP 导入导出；凭据仓储与绑定继续保留在第 22 节，不作为后续实现前置条件。
+
+### Step 6：四类工具模板 ZIP 导入导出（completed，2026-07-20）
+
+#### Step 6.1：安全归档层与批量原子写入（completed）
+
+- 目标：在不把 ZIP 解压到文件系统的前提下解析和生成统一模板包，并确保任一模板无效或 ID 冲突时整批不写入。
+- 输入格式：只允许 `{id}/manifest.json + {id}/definition.json + 可选 {id}/main.py`；一个 ZIP 可以包含一个或多个模板。
+- 安全边界：拒绝绝对路径、`..`、反斜杠路径、符号链接、加密条目、重复路径、未知文件、超过 300 个条目、压缩包超过 20 MB、解压后超过 50 MB以及异常压缩比。
+- 不兼容规则：根目录旧 `manifest.json + main.py` 和缺少 `definition.json` 的旧 Script / Agent 包均明确拒绝。
+- 仓储输出：新增批量创建操作；写入前统一检查包内重复 ID 和仓储现有 ID，写入中异常时删除本批已创建目录并同步回滚内存快照。同名模板仍允许，模板 ID 冲突拒绝覆盖。
+- 专项验证：`uv run pytest tests/test_tool_template_archives.py tests/test_tool_templates.py -q`，结果 `18 passed, 1 warning`；覆盖多模板往返、HTTP CONFIG 无 `main.py`、路径穿越、旧布局、未知文件、同 ID 冲突和无部分写入。
+- 静态验证：`web/tool_templates.py`、`web/tool_template_archives.py` 通过 `py_compile`；相关文件 `git diff --check` 通过。
+- 依赖结论：Step 6.1 已通过，可以开始 Step 6.2 导入导出 API；尚未接入 Web API 和前端按钮。
+
+#### Step 6.2：模板 ZIP 导入导出 API（completed）
+
+- 导入 API：`POST /api/tool-templates/import` 接收单个 `.zip` 文件；先限制读取到 20 MB，再调用安全归档层整包解析和批量原子写入。成功返回导入数量和完整模板列表。
+- 导出 API：`POST /api/tool-templates/export` 接收 `template_ids`；非空时只导出指定模板，空列表导出全部。重复请求 ID 去重，任一 ID 不存在时拒绝请求，不生成不完整包。
+- ID 规则：导入保留包内模板 ID；目标仓储已有同 ID 时整包返回 400，不覆盖、不自动换 ID。同名但不同 ID 仍允许。
+- 往返验证：在源仓储创建 AGENT 和 HTTP 模板，仅导出指定 AGENT 后切换到新的空仓储导入，模板对象与 `manifest.json / definition.json / main.py` 内容保持一致并可由仓储回读。
+- 失败验证：含“一个新模板 + 一个冲突模板”的 ZIP 导入返回 400，新模板目录没有产生；旧根目录包和非 `.zip` 文件均返回 400，仓储保持为空。
+- 专项验证：`uv run pytest tests/test_tool_template_archives.py tests/test_tool_templates.py -q`，结果 `21 passed, 1 warning`。
+- 静态验证：`web/routes_tool_templates.py`、归档层和仓储通过 `py_compile`，相关文件 `git diff --check` 通过。
+- 依赖结论：Step 6.2 已通过，可以开始 Step 6.3 工具模板页面导入导出和桌面 E2E。
+
+#### Step 6.3：工具模板页面与 ZIP 往返 E2E（completed）
+
+- 前端输出：工具模板页新增“导入 ZIP”“导出全部”，每行新增仅图标的“导出工具模板”；文件输入支持一次选择多个 ZIP，并逐包累计导入数量和失败原因。
+- 安全提示：每次导出前明确提示当前不会自动清理 `config` 或 `main.py` 中的凭据，只能交给可信接收者；凭据仓储、自动剥离和脱敏仍属于第 22 节待优化项。
+- 真实流程：在新启动的 8013 服务中通过页面创建 SCRIPT 模板，填写 Inputs、Config、Outputs 和 `main.py`；调用同一真实导出 API 生成标准 ZIP，删除源模板，再调用真实导入 API恢复模板。浏览器刷新后名称、说明、大写类型和四段完整内容均与导出前一致。
+- UI 验证：页面显示多 ZIP 导入、导出全部和单模板导出三个入口；`1440x900` 桌面截图未发现控件重叠或文本越界，页面横向溢出小于等于 `0px`。
+- 自动化限制：当前浏览器控制层不提供本地文件输入能力，无法自动执行隐藏 `<input type="file">` 的文件选择；真实 ZIP 上传改由同一 8013 服务 API执行，随后由浏览器完成页面回读。文件选择事件绑定由前端专项测试和 JavaScript 语法检查覆盖。
+- 数据清理：E2E 模板、临时 ZIP 和 8013 测试服务均已清理；`tool_registry/` 恢复为只含 `.gitkeep`。
+- 专项验证：`uv run pytest tests/test_tool_template_archives.py tests/test_tool_templates.py tests/test_tool_templates_frontend.py -q`，结果 `23 passed, 1 warning`。
+- 构建与静态验证：`npm run build` 成功；Python `py_compile`、四个相关 JavaScript `node --check` 和 `git diff --check` 均通过。
+- 全量回归：`uv run pytest -q`，结果 `95 passed, 1 warning`；warning 仍为既有 Starlette/httpx 弃用提示。
+- 未覆盖：模板独立执行、SSE/中断、HTTP CONFIG 执行器、Workflow 持久化、画布发布模板和凭据保护尚未实现。
+- 依赖结论：Step 6 已完成，可以进入 Step 7 模板独立执行；ZIP 包格式不再阻塞后续跨环境模板测试。
+
+### Step 7：工具模板独立执行（completed，2026-07-20）
+
+#### Step 7.1：统一可中断执行内核（completed）
+
+- 目标：彻底替换旧 Agent 六参数和 `${...}` 编译协议，让四类模板在进入 Workflow 前即可按新协议真实运行。
+- 模块替换：删除 `web/agent_runtime.py` 和 `web/agent_worker.py`；新增通用 `tool_runtime.py`、`tool_worker.py` 和 `tool_execution.py`。
+- Python 协议：AGENT、LLM、SCRIPT 以及 HTTP CODE 在独立子进程顶层获得 `inputs`、`config`，并通过顶层 `response` 返回严格 JSON；不再执行旧固定模板参数替换。
+- HTTP CONFIG：同样在可终止子进程内使用 httpx 发起真实请求；支持 Method、URL、Headers、Params、RAW、FORM_DATA、FORM_URLENCODED 和 BINARY body，标准 response 包含 `status_code / headers / body`，非 2xx 作为执行失败。
+- 运行控制：统一 120 秒默认超时、运行 ID 占用、预中断、进程树终止、stdout/stderr 流式日志和显式 flush；NaN、Infinity、循环引用及不可 JSON 序列化 response 均拒绝。
+- 修复记录：首轮测试发现 Windows 子进程协议中文受系统代码页影响，已改为 ASCII JSON 转义传输并在解析后恢复 Unicode；同时修复空 Params 覆盖 URL 原有查询串的问题。
+- 专项验证：`uv run pytest tests/test_tool_execution.py tests/test_run_stream.py -q`，结果 `10 passed`；覆盖三类 Python 成功、config 合并、无换行 flush、严格 JSON 失败、超时、中断、真实 HTTP CONFIG 请求、日志顺序/上限和单消费者。
+- 静态验证：三个新执行模块通过 `py_compile`，相关文件 `git diff --check` 通过。
+- 依赖结论：Step 7.1 已通过，可以开始 Step 7.2 启动、SSE 和中断 API；尚未提供模板页面运行入口。
+
+#### Step 7.2：模板运行启动、SSE 和中断 API（completed）
+
+- 启动：`POST /api/tool-templates/{template_id}/runs` 接收本次 `run_id / inputs / timeout_seconds`，快照当前模板对象后立即返回 `RUNNING`；测试 inputs 和超时不写回模板。
+- 日志与结果：`GET /api/tool-templates/runs/{run_id}/events` 使用无回放、单消费者 SSE，按序发送 `log`，终态发送 `complete` 或 `interrupted`；终态包含严格 JSON response、latency 和日志截断标志。
+- 中断：`POST /api/tool-templates/runs/{run_id}/interrupt` 调用统一进程树终止；不存在的运行返回 404，重复运行 ID 返回 409。
+- 失败协议：用户代码异常、NaN/Infinity 等 response 序列化错误保留 Traceback 日志并以 `ok: false` 完成，不使用旧 `repr()` 回退。
+- 专项验证：`uv run pytest tests/test_tool_template_runs.py tests/test_tool_execution.py tests/test_run_stream.py -q`，结果 `13 passed, 1 warning`；覆盖真实 API启动、SSE 日志、成功 response、严格失败、重复 ID、中断和缺失运行。
+- 静态验证：路由、事件流和执行模块通过 `py_compile`；相关文件 `git diff --check` 通过。
+- 依赖结论：Step 7.2 已通过，可以开始 Step 7.3 模板编辑页独立测试面板和桌面 E2E。
+
+#### Step 7.3：模板独立测试页面、旧执行链清理和 E2E（completed）
+
+- 页面输出：模板编辑页新增“独立测试”区，包含本次 Inputs JSON、运行/中断、`PENDING / RUNNING / PASSED / FAILED` 状态、100ms 累计耗时、实时日志、response 和清空按钮。
+- 运行语义：点击运行先保存当前编辑内容但不刷新页面，再启动新 Worker，确保执行眼前版本；测试 Inputs、状态、耗时和日志均不写入模板，刷新后消失。
+- 浏览器成功流程：真实 SCRIPT 模板输出 `stream-log`，使用持久 `config.prefix` 和本次 `inputs.question` 生成 `response.answer`；页面实测 `RUNNING → PASSED`，终态耗时 240ms，日志与 response 完整显示。
+- 浏览器中断流程：把同一模板改为输出日志后休眠 10 秒，运行中点击中断；页面进入 `FAILED`，耗时冻结约 2.1 秒，运行按钮恢复，中断按钮禁用，Worker 及进程树已终止。
+- 桌面布局：`1440x900` 截图确认测试 Inputs 和日志区并排、按钮和状态无重叠，页面横向溢出小于等于 `0px`。
+- 彻底清理：删除不可达的旧 `/api/tools` 前端管理、旧 Agent/Script SSE UI、旧工具弹窗、旧 Agent Worker/Runtime；删除只服务旧工具编辑器的 CodeMirror 源码、bundle、测试、npm 依赖和构建步骤。生产源码扫描 `/api/tools`、`agent_runtime`、`agent_worker` 均为零命中。
+- E2E 清理：临时模板和 8013 测试服务已删除，`tool_registry/` 只保留 `.gitkeep`。
+- 专项验证：执行内核/运行 API/事件流/前端面板结果 `15 passed, 1 warning`；清理后的前端专项结果 `16 passed, 1 warning`。
+- 构建与静态验证：`npm run build` 现只构建 Workflow bundle并成功；Python 编译、JavaScript 语法和 `git diff --check` 通过。
+- 全量回归：`uv run pytest -q`，结果 `103 passed, 1 warning`；warning 为既有 Starlette/httpx 弃用提示。
+- 未覆盖：本步没有真实供应商 API Key，因此只证明新 Python Worker 和本地 HTTP CONFIG 真实请求；不得宣称 DeepSeek/Qwen 新协议 live 矩阵已通过。画布发布模板、Workflow 持久化、DAG 调度、Run 追溯和凭据保护尚未实现。
+- 依赖结论：Step 7 已完成，可以开始 Step 8 画布工具发布为独立新模板。
+
+### Step 8：画布工具发布为独立模板（completed，2026-07-20）
+
+#### Step 8.1：独立发布 API 与 API Key 清理（completed）
+
+- 发布契约：`POST /api/tool-templates/publish` 接收完整大写类型、名称、说明、definition 和可选 `main.py`；后端每次生成新的模板 ID，不接受来源模板 ID，不覆盖现有模板，同名允许。
+- 独立性：重复发布同一请求生成两个不同 ID 的完整模板，发布对象与当前画布节点及任何来源模板均无运行时引用。
+- 秘密处理：发布时递归清空 `config` 中明确命名为 `api_key / apiKey` 的值，保留配置结构；不猜测性修改 Python 代码中的字符串。Authorization、Cookie、Token、其他密码和日志脱敏仍属于待优化范围。
+- 校验：请求 `type` 必须与 `definition.type` 一致，Python 类型和 HTTP CODE 继续由 ToolTemplate 模型强制要求 `main.py`。
+- 专项验证：`uv run pytest tests/test_tool_templates.py -q`，结果 `13 passed, 1 warning`；覆盖不同 ID、同名、嵌套 API Key 清理、代码保留和类型不匹配无写入。
+- 静态验证：发布路由通过 `py_compile`，相关文件 `git diff --check` 通过。
+- 依赖结论：Step 8.1 已通过，可以开始 Step 8.2 画布节点定义转换、右键发布和桌面 E2E。
+
+#### Step 8.2：画布右键发布与桌面 E2E（completed）
+
+- 入口：HTTP、AGENT、LLM、SCRIPT 节点右键菜单新增“发布为工具模板”；Start/End 系统节点不显示该命令。节点卡片右上角仍只有运行，编辑器标题栏仍只有运行/保存/关闭。
+- 定义转换：模板来源节点优先深拷贝其内嵌 definition；空白节点生成简化 inputs/outputs/config。HTTP 节点把 Headers、Params、Body Type 和 Body 行转换回标准 HTTP definition；Python 节点携带当前 `mainPy`。
+- 发布行为：前端只发送完整类型、名称、说明、definition 和 `main_py`，不发送或保存来源模板 ID；发布成功后仅把后端返回的新模板加入当前模板面板缓存，不反向绑定当前节点。
+- 风险提示：发布确认明确说明 config API Key 会清空、代码秘密不会自动修改；后端继续作为最终清理边界。
+- 浏览器 E2E：在空仓储的 Studio 中右键“规则校验”SCRIPT，确认菜单存在发布项并完成确认；页面显示成功 Toast，模板面板立即出现“规则校验 SCRIPT”。后端回读得到新 UUID、空 inputs/outputs/config 和 `response = inputs`。Start 节点右键菜单只有运行/拷贝/删除，无发布项。
+- 清理回归：真实浏览器首次进入 Workflow 时发现 `execution.js` 尚有三个已删除 CodeMirror 销毁函数调用，导致主区为空；已删除残留调用并增加生产前端零引用断言，导航复测通过。
+- 数据清理：E2E 发布模板和 8013 测试服务均已删除，`tool_registry/` 只保留 `.gitkeep`。
+- 专项验证：`uv run pytest tests/test_execution_frontend.py tests/test_tool_templates.py -q`，结果 `21 passed, 1 warning`；修复导航后 Studio 专项 `8 passed, 1 warning`。
+- 构建与静态验证：`npm run build`、Python `py_compile`、JavaScript `node --check` 和 `git diff --check` 全部通过。
+- 全量回归：`uv run pytest -q`，结果 `106 passed, 1 warning`；warning 为既有 Starlette/httpx 弃用提示。
+- 依赖结论：Step 8 已完成。下一阶段是新版 Workflow 持久化与 DAG 协议；分支/汇合、端口、失败传播、循环和输入映射仍在第 16 节列为未确认业务规则，未确认前不得自行实现执行语义。
+
+### Step 9：发布前全量验收与环境清理（completed，2026-07-20）
+
+- 目标：确认 T13.2 当前已实现范围可构建、可回归且不包含 E2E 临时数据，再提交并推送本次不兼容重构。
+- 浏览器清理：恢复临时 `1440x900` 视口覆盖，并清理 `http://127.0.0.1:8013/` 的测试标签页；不影响用户当前 `8012` 服务页面。
+- 数据清理：复核 `tool_registry/` 只包含 `.gitkeep`，没有临时模板目录或测试 ZIP。
+- 生产构建：`npm run build` 通过，重新生成 Workflow JavaScript/CSS bundle。
+- 全量回归：`uv run pytest -q` 结果为 `106 passed, 1 warning`，耗时 3.79 秒；warning 仍为既有 Starlette/httpx 弃用提示。
+- 静态检查：生产 Python `compileall`、`app.js / tool-templates.js / execution.js / workflow-canvas.js` 的 `node --check`、常见真实令牌值模式扫描和 `git diff --check` 全部通过；README 中只存在环境变量名和 `<your-key>` 占位示例。
+- E2E 覆盖：本阶段已覆盖工具模板 CRUD、ZIP 往返、模板删除后的画布深拷贝、SCRIPT 独立执行、运行中断、画布发布新模板、系统节点禁止发布，以及桌面布局无横向溢出或可见重叠。
+- 未覆盖与风险：没有真实供应商 API Key，因此不得宣称新 AGENT/LLM Worker 已通过 DeepSeek/Qwen live 验证；Workflow 持久化、DAG 执行、Run 追溯和独立凭据仓储仍未实现，必须先完成第 16 节业务规则确认。
+- 价值验证：新手可从四类模板复制完整定义到画布后少量修改，画布个性化节点也可发布为独立模板；两者无来源绑定，模板删除、更新或同名均不会改变既有画布节点。
+
+## 22. 待优化项目
+
+### 22.1 独立凭据仓储与绑定
+
+- 建立仅保存在本机的加密或受保护凭据仓储，支持 API Key、Bearer Token、Basic Auth、Cookie、自定义 Header、Client Secret 和证书等类型。
+- 工具模板只声明凭据需求，不保存真实秘密；Workflow 可设置默认凭据，节点可按需覆盖。
+- 节点保存 `credential_id` 或槽位绑定，运行时只在内存中解析并注入 `config["credentials"]`。
+- 模板独立测试、节点运行和 Workflow 运行共用缺失凭据预检查及“绑定并运行”流程。
+- 画布内复制节点可保留同机绑定；发布模板和导出 Workflow 必须剥离本机凭据 ID；导入后显示未绑定并要求接收者重新选择。
+- 删除或失效凭据后，引用节点必须进入明确的“凭据失效”状态并禁止运行。
+- 对日志、错误、Artifact 和用户主动打印内容增加已知秘密值脱敏；明确无法可靠识别任意 Python 硬编码秘密的残余风险。

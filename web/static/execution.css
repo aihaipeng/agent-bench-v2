@@ -55,7 +55,7 @@
 }
 
 .workflow-table {
-    min-width: 1080px;
+    min-width: 1040px;
 }
 
 .workflow-table th:last-child,
@@ -69,6 +69,28 @@
     align-items: center;
     justify-content: center;
     gap: 5px;
+}
+
+#workflows-toolbar .btn-primary:not(:has(.icon-img)) {
+    border-color: #0f766e;
+    background: #0f766e;
+    color: #fff;
+}
+
+#workflows-toolbar .btn-primary:not(:has(.icon-img)):hover {
+    border-color: #0d9488;
+    background: #0d9488;
+}
+
+#btn-workflow-refresh:not(:has(.icon-img)) {
+    border-color: #bfdbfe;
+    background: #eff6ff;
+    color: var(--color-accent);
+}
+
+.workflow-list-count {
+    padding: 0 2px 0 12px;
+    line-height: 34px;
 }
 
 .workflow-description-cell {

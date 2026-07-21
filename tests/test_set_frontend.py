@@ -4,30 +4,22 @@ from pathlib import Path
 STATIC_DIR = Path(__file__).parents[1] / "web" / "static"
 
 
-def test_list_storage_identifiers_open_their_existing_directories():
+def test_set_storage_identifiers_open_their_existing_directories():
     app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     style_css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
     assert 'class="list-meta-link set-file-link"' in app_js
-    assert 'class="list-meta-link tool-id-link"' in app_js
     assert "tbody.querySelectorAll('.set-file-link').forEach(bindSetFilenameLink)" in app_js
-    assert "tbody.querySelectorAll('.tool-id-link').forEach(bindToolIdLink)" in app_js
     assert "if (filename) openDir(filename)" in app_js
-    assert "if (toolId) openToolDir(toolId)" in app_js
     assert "e.stopPropagation()" in app_js
-    assert "function shortToolId(toolId)" in app_js
-    assert "toolId.slice(0, 16) + '…'" in app_js
-    assert 'data-tool-id="' in app_js
     assert ".list-meta-link" in style_css
     assert "font-size: 11px" in style_css
     assert '<th class="col-address" data-col="address">地址</th>' in app_js
-    assert '<th class="tool-equal-col" data-col="address">地址</th>' in app_js
-    assert app_js.count('class="action-buttons action-buttons-single"') == 2
+    assert app_js.count('class="action-buttons action-buttons-single"') == 1
     assert 'data-action="edit"' not in app_js
     assert 'data-action="open-dir"' not in app_js
-    assert app_js.count('data-action="delete"') == 2
+    assert app_js.count('data-action="delete"') == 1
     assert "--set-data-col-w: calc((100% - 36px) / 5)" in style_css
-    assert "--tool-data-col-w: calc((100% - 36px) / 6)" in style_css
     assert ".action-buttons-single" in style_css
 
 
@@ -50,17 +42,12 @@ def test_batch_action_groups_shift_left_and_set_checkboxes_share_a_size():
     app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     style_css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
-    assert app_js.count('class="toolbar-batch-actions"') == 2
+    assert app_js.count('class="toolbar-batch-actions"') == 1
     sets_toolbar = app_js[
-        app_js.index('id="sets-toolbar"') : app_js.index("View: Tool Management")
+        app_js.index('id="sets-toolbar"') : app_js.index("function bindSetsEvents")
     ]
     set_actions = sets_toolbar[sets_toolbar.index('class="toolbar-batch-actions"') :]
     assert 'id="btn-delete-batch"' in set_actions
-    tools_toolbar = app_js[app_js.index('id="tools-toolbar"') :]
-    tool_actions = tools_toolbar[tools_toolbar.index('class="toolbar-batch-actions"') :]
-    assert tool_actions.index('id="btn-tool-import"') < tool_actions.index(
-        'id="btn-tool-export-batch"'
-    ) < tool_actions.index('id="btn-tool-delete-batch"')
     assert ".toolbar-batch-actions" in style_css
     assert "margin-right: 40px" in style_css
     assert 'input[type="checkbox"].row-check,\n#check-all {' in style_css
