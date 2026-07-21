@@ -257,7 +257,7 @@ def test_workflow_draft_accepts_parallel_complete_paths(tmp_path, monkeypatch):
     assert response.status_code == 200
 
 
-def test_update_and_run_api_cannot_bypass_complete_path_validation(
+def test_explicit_save_rejects_incomplete_graph_but_single_node_run_allows_it(
     tmp_path, monkeypatch
 ):
     database_path = _patch_database(tmp_path, monkeypatch)
@@ -273,6 +273,12 @@ def test_update_and_run_api_cannot_bypass_complete_path_validation(
     assert update.status_code == 422
     assert client.get(f"/api/workflow-drafts/{created['id']}").json()["workflow"]["name"] == "客服评测流程"
 
+    node_run_snapshot = client.put(
+        f"/api/workflow-drafts/{created['id']}?for_node_run=true",
+        json=invalid_update,
+    )
+    assert node_run_snapshot.status_code == 200
+
     historical = _graph_body(name="historical invalid")
     historical["nodes"] = [historical["nodes"][0]]
     historical["edges"] = []
@@ -282,8 +288,9 @@ def test_update_and_run_api_cannot_bypass_complete_path_validation(
     run = client.post(
         "/api/workflow-drafts/historical-invalid/nodes/llm-1/runs"
     )
-    assert run.status_code == 422
-    assert "START" in run.text
+    assert run.status_code == 200
+    assert run.json()["run"]["status"] == "FAILED"
+    assert run.json()["run"]["error"]["message"] == "用户提示词解析后不能为空"
 
 
 def test_workflow_draft_rejects_visible_variable_name_conflicts(tmp_path, monkeypatch):

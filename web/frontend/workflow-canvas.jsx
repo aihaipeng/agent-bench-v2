@@ -1242,16 +1242,18 @@ function WorkflowStudio({options}) {
         loadModelProviders();
     }, [loadModelProviders]);
 
-    const persistDraft = useCallback(async () => {
+    const persistDraft = useCallback(async ({forNodeRun = false} = {}) => {
         if (!options.onPersist) throw new Error('Workflow 持久化入口不可用');
         const name = workflowName.trim();
         if (!name) throw new Error('Workflow 名称不能为空');
-        const graphError = validateCompleteWorkflowGraph(nodes, edges);
-        if (graphError) {
-            setSaveState('保存失败');
-            throw new Error(graphError);
+        if (!forNodeRun) {
+            const graphError = validateCompleteWorkflowGraph(nodes, edges);
+            if (graphError) {
+                setSaveState('保存失败');
+                throw new Error(graphError);
+            }
         }
-        setSaveState('正在保存');
+        if (!forNodeRun) setSaveState('正在保存');
         try {
             const saved = await options.onPersist({
                 id: workflowId,
@@ -1260,16 +1262,19 @@ function WorkflowStudio({options}) {
                 nodes: nodes.map(serializableNode),
                 edges: edges.map(serializableEdge),
                 global_variables: cloneValue(globalVariables),
+                forNodeRun,
             });
             setWorkflowId(saved.id);
-            setSaveState('已保存');
-            setNodes((current) => current.map((node) => ({
-                ...node,
-                data: {...node.data, isDirty: false},
-            })));
+            if (!forNodeRun) {
+                setSaveState('已保存');
+                setNodes((current) => current.map((node) => ({
+                    ...node,
+                    data: {...node.data, isDirty: false},
+                })));
+            }
             return saved.id;
         } catch (error) {
-            setSaveState('保存失败');
+            if (!forNodeRun) setSaveState('保存失败');
             throw error;
         }
     }, [edges, globalVariables, nodes, options, setNodes, workflowId, workflowName]);
@@ -1379,11 +1384,6 @@ function WorkflowStudio({options}) {
 
     const runNode = useCallback(async (id) => {
         if (activeNodeRuns.current.has(id)) return 'RUNNING';
-        const graphError = validateCompleteWorkflowGraph(nodes, edges);
-        if (graphError) {
-            if (window.showToast) window.showToast(graphError, 'error');
-            return 'FAILED';
-        }
         const targetNode = nodes.find((node) => node.id === id);
         if (!targetNode) return 'FAILED';
         const active = {workflowId: null, interruptRequested: false};
@@ -1433,7 +1433,7 @@ function WorkflowStudio({options}) {
         }, 100);
         try {
             if (!isExecutable) return markLocalFinished(active.interruptRequested ? 'INTERRUPTED' : 'SUCCESS');
-            const activeWorkflowId = await persistDraft();
+            const activeWorkflowId = await persistDraft({forNodeRun: true});
             active.workflowId = activeWorkflowId;
             if (active.interruptRequested) return markLocalFinished('INTERRUPTED');
             const streaming = targetNode.data.nodeType === 'LLM' && targetNode.data.modelParameters?.stream === true;

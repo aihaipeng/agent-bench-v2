@@ -1347,6 +1347,15 @@ T13.2.1-T13.2.6 已完成
 - 状态契约：运行状态对外统一为 `PENDING / RUNNING / SUCCESS / FAILED / INTERRUPTED`；SQLite 历史 `PASSED` 仅作为一次性迁移输入，普通响应字段中的同名业务值保持原样。
 - 安全：代码、测试、文档和构建产物未发现用户 API Key 候选；浏览器临时 Workflow 已删除，API 列表回到 0 条。
 
+##### 15.4 单节点调试与完整图校验解耦（completed，2026-07-22）
+
+- 业务修正：节点卡片和节点编辑器右上角的运行按钮只运行当前节点，不依赖 `START / END`，也不要求当前 Workflow 已形成完整路径。
+- 保存边界：显式保存节点或 Workflow、以及画布级运行仍执行完整 `START → END` 校验；单节点运行只创建/更新内部运行快照，不把界面标记为“已保存”，不清除未保存状态。
+- 后端边界：草稿 POST/PUT 仅在 `for_node_run=true` 的内部运行快照请求中允许不完整图；节点阻塞/流式运行接口不再校验整张图，但继续校验当前节点的模型、提示词、参数或代码。
+- 验证：`uv run pytest tests/test_workflow_drafts.py tests/test_workflow_node_runs.py tests/test_llm_node_runs.py tests/test_execution_frontend.py -q` 结果 `37 passed, 1 warning`；覆盖显式保存拒绝、不完整图快照允许和单节点自身配置失败。
+- 浏览器验收：使用仅含一个 LLM、完全没有 `START / END` 的临时 Workflow，选择 DeepSeek 并填写提示词后从编辑器右上角启动；节点立即进入 `RUNNING`，运行按钮禁用、中断按钮启用，最终在 `15.5s` 进入 `SUCCESS`。临时 Workflow 随后删除。
+- 发布回归：前端资源升级为 `v=30`；全量 `uv run pytest -q` 结果 `185 passed, 6 skipped, 1 warning in 18.53s`，JS/Python 静态检查和 `git diff --check` 通过。
+
 ## 22. 待优化项目
 
 ### 22.1 独立凭据仓储与绑定

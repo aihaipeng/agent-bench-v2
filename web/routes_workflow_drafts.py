@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -190,8 +190,10 @@ def list_workflow_drafts() -> WorkflowDraftListResponse:
 @router.post("", response_model=WorkflowDraftEnvelope)
 def create_workflow_draft(
     body: WorkflowDraftConfiguration,
+    for_node_run: bool = Query(default=False),
 ) -> WorkflowDraftEnvelope:
-    _validate_complete_graph(body)
+    if not for_node_run:
+        _validate_complete_graph(body)
     try:
         workflow = get_repository().create_draft(
             WorkflowDraftRecord(**body.model_dump(mode="json"))
@@ -210,8 +212,10 @@ def get_workflow_draft(workflow_id: str) -> WorkflowDraftEnvelope:
 def update_workflow_draft(
     workflow_id: str,
     body: WorkflowDraftConfiguration,
+    for_node_run: bool = Query(default=False),
 ) -> WorkflowDraftEnvelope:
-    _validate_complete_graph(body)
+    if not for_node_run:
+        _validate_complete_graph(body)
     current = get_workflow_or_404(workflow_id)
     updated = WorkflowDraftRecord(
         id=current.id,
@@ -754,7 +758,6 @@ async def run_workflow_node(
 ) -> WorkflowNodeRunEnvelope:
     active = _register_active_node_run(workflow_id, node_id)
     try:
-        _validate_complete_graph(get_workflow_or_404(workflow_id))
         return await _run_node_without_registry(workflow_id, node_id, active)
     finally:
         _unregister_active_node_run(workflow_id, node_id, active)
@@ -789,7 +792,6 @@ async def stream_llm_node(
     active = _register_active_node_run(workflow_id, node_id, task=None)
     try:
         workflow = get_workflow_or_404(workflow_id)
-        _validate_complete_graph(workflow)
         node = _find_node(workflow, node_id)
     except Exception:
         _unregister_active_node_run(workflow_id, node_id, active)

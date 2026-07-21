@@ -313,9 +313,10 @@ async function openWorkflowEditor(workflowId) {
                 edges: draft.edges || [],
                 global_variables: draft.global_variables || [],
             };
+            var query = draft.forNodeRun ? '?for_node_run=true' : '';
             var data = draft.id
-                ? await API.put('/api/workflow-drafts/' + encodeURIComponent(draft.id), body)
-                : await API.post('/api/workflow-drafts', body);
+                ? await API.put('/api/workflow-drafts/' + encodeURIComponent(draft.id) + query, body)
+                : await API.post('/api/workflow-drafts' + query, body);
             workflow = data.workflow;
             var existingIndex = executionState.workflows.findIndex(function (item) {
                 return item.id === workflow.id;
