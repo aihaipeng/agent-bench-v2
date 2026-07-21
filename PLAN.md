@@ -1162,7 +1162,7 @@ T13.2.1-T13.2.6 已完成
 - 发布处理：前端资源版本递增至 `v=26`，避免用户刷新时复用旧 bundle。
 - 依赖结论：节点编辑器窗口缩放和浏览器原生缩放边界已收敛，可以进入最终全量回归与发布。
 
-#### Step 12.4：真实模型、全量回归与发布（in progress，2026-07-22）
+#### Step 12.4：真实模型、全量回归与发布（completed，2026-07-22）
 
 - 真实模型：千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 已在 Step 12.2 的真实企业 Agent 合规评测场景通过；Step 12.3E 另以 DeepSeek 真实响应验证 `STRING / INTEGER` 提取、类型转换、日志与草稿恢复。
 - 前端 E2E：已覆盖模型选择、阻塞运行、原始日志、输出类型、变量复制、流式标题以及节点编辑器窗口放大/缩小；复制验收以剪贴板真实读回值为准，不再只依赖提示消息。
@@ -1170,7 +1170,7 @@ T13.2.1-T13.2.6 已完成
 - 构建与静态检查：`npm run build`、`node --check web/static/assets/workflow-canvas.js`、`uv run python -m compileall -q execution web` 和 `git diff --check` 全部通过。
 - 安全扫描：待提交文件 `sk-` 候选扫描排除构建产物中的 CSS 标识符后，带数字的凭据候选为 0；未把用户 API Key 写入代码、测试、文档或提交内容。
 - 测试数据清理：真实 E2E 临时 Workflow `fe539097aaca4befbd2c049abe0990ef` 已通过删除 API 清理，随后 GET 返回 `404`。
-- 发布状态：等待 Git 差异审查、提交和推送到 `origin/codex/tool-template-refactor`。
+- 发布结果：功能与测试改造已提交为 `8d405e9`（`Add persistent LLM workflow execution`），并成功推送到 `origin/codex/tool-template-refactor`；随后本计划收口记录单独提交并同步推送。
 
 ## 22. 待优化项目
 
