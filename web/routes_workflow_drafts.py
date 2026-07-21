@@ -1,15 +1,18 @@
 """Workflow Studio draft persistence and real LLM node run APIs."""
 
 import json
+import asyncio
 import time
 import traceback
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import httpx
 from pydantic import BaseModel, ConfigDict
+from web.tool_runtime import stream_tool_worker
 
 from execution import (
     DEFAULT_DATABASE_PATH,
@@ -188,6 +191,190 @@ def _response_error_message(response, api_key: str) -> str:
     )
 
 
+def _json_text(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2)
+
+
+def _safe_http_headers(headers: dict[str, Any]) -> dict[str, Any]:
+    secret_names = {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+    return {
+        key: "[REDACTED]" if key.lower() in secret_names else value
+        for key, value in headers.items()
+    }
+
+
+def _rows_to_mapping(rows: Any, variables: dict[str, Any], label: str) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        raise ValueError(f"{label} 必须是数组")
+    result: dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError(f"{label} 字段必须是对象")
+        key = row.get("key", "")
+        if not isinstance(key, str) or not key.strip():
+            continue
+        result[key.strip()] = resolve_templates(row.get("value", ""), variables)
+    return result
+
+
+def _http_execution_request(
+    data: dict[str, Any], variables: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = data.get("httpConfig") if isinstance(data.get("httpConfig"), dict) else {}
+    method = str(config.get("method", "POST")).upper().strip()
+    url = resolve_templates(str(config.get("url", "")), variables).strip()
+    if not url:
+        raise ValueError("HTTP 请求 URL 不能为空")
+    headers = _rows_to_mapping(config.get("headers", []), variables, "Headers")
+    params = _rows_to_mapping(config.get("params", []), variables, "Params")
+    body_type = str(config.get("bodyType", "none")).upper().replace("-", "_")
+    if body_type not in {"NONE", "FORM_DATA", "X_WWW_FORM_URLENCODED", "RAW", "BINARY"}:
+        raise ValueError(f"不支持的 Body 类型: {body_type}")
+    if body_type == "BINARY":
+        raise ValueError("HTTP Binary Body 需要文件内容，当前节点暂不支持直接执行")
+    worker_body_type = "FORM_URLENCODED" if body_type == "X_WWW_FORM_URLENCODED" else body_type
+    if body_type in {"FORM_DATA", "X_WWW_FORM_URLENCODED"}:
+        body = _rows_to_mapping(config.get("bodyFields", []), variables, "Body")
+    elif body_type == "RAW":
+        body = resolve_templates(str(config.get("bodyText", "")), variables)
+    else:
+        body = None
+    execution_request = {
+        "method": method,
+        "url": url,
+        "headers": headers,
+        "params": params,
+        "body_type": worker_body_type,
+        "body": body,
+    }
+    logged_request = {
+        **execution_request,
+        "headers": _safe_http_headers(headers),
+    }
+    return execution_request, logged_request
+
+
+async def _run_python_or_http_node(
+    workflow: WorkflowDraftRecord,
+    node: dict[str, Any],
+    repository: WorkflowDraftRepository,
+) -> WorkflowNodeRunRecord:
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    node_type = data.get("nodeType")
+    variables = _execution_variable_values(repository, workflow, node["id"])
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    config = resolve_templates(config, variables)
+    input_snapshot: dict[str, Any] = {
+        "node_type": node_type,
+        "inputs": variables,
+        "config": config,
+    }
+    events = [_event("INFO", f"开始执行 {node_type} 节点")]
+    started = time.perf_counter()
+    input_snapshot["resolved_inputs"] = variables
+    request_for_extraction: dict[str, Any] = {}
+    logged_request: dict[str, Any] = {}
+    worker_payload: dict[str, Any] = {}
+    run = WorkflowNodeRunRecord(
+        workflow_id=workflow.id,
+        node_id=node["id"],
+        status=WorkflowNodeRunStatus.RUNNING,
+        input_snapshot=input_snapshot,
+        request_body=logged_request,
+        events=events,
+    )
+    repository.create_run(run)
+    timeout_seconds = config.get("timeout_seconds", config.get("timeoutSeconds", 120))
+    try:
+        timeout_seconds = float(timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        timeout_seconds = 120
+        events.append(_event("WARN", f"超时配置无效，使用默认值 120 秒: {exc}"))
+    try:
+        if node_type == "HTTP":
+            request_for_extraction, logged_request = _http_execution_request(data, variables)
+            worker_payload = {
+                "mode": "HTTP_CONFIG",
+                "inputs": variables,
+                "config": config,
+                "http": request_for_extraction,
+            }
+        elif node_type in {"AGENT", "SCRIPT"}:
+            request_for_extraction = {"inputs": variables, "config": config}
+            logged_request = request_for_extraction
+            worker_payload = {
+                "mode": "PYTHON",
+                "code": data.get("mainPy") or "response = inputs",
+                "inputs": variables,
+                "config": config,
+            }
+        else:
+            raise ValueError(f"不支持真实执行的节点类型: {node_type}")
+        events.append(_event("INFO", "开始执行子进程"))
+        worker_result = await asyncio.to_thread(
+            stream_tool_worker,
+            worker_payload,
+            lambda message: events.append(_event("INFO", message)),
+            uuid4().hex,
+            timeout_seconds,
+        )
+        raw_response = worker_result.get("response") if "response" in worker_result else None
+        response_body = _json_text(raw_response) if "response" in worker_result else ""
+        stdout = str(worker_result.get("stdout", ""))
+        stderr = str(worker_result.get("stderr", ""))
+        http_status = worker_result.get("http_status")
+        if http_status is None and isinstance(raw_response, dict):
+            http_status = raw_response.get("status_code")
+        events.append(_event("INFO", "子进程执行完成"))
+        if not worker_result.get("ok"):
+            message = str(worker_result.get("error") or "节点执行失败")
+            raise RuntimeError(message)
+        output_variables = extract_output_variables(
+            node,
+            request=request_for_extraction,
+            response=raw_response,
+        )
+        events.append(_event("INFO", "输出变量提取完成"))
+        return run.model_copy(update={
+            "status": WorkflowNodeRunStatus.PASSED,
+            "finished_at": utc_now_iso(),
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "input_snapshot": input_snapshot,
+            "request_body": logged_request,
+            "events": events,
+            "output": raw_response,
+            "stdout": stdout,
+            "stderr": stderr,
+            "response_body": response_body,
+            "output_variables": output_variables,
+            "http_status": http_status,
+        })
+    except Exception as exc:
+        message = str(exc)
+        events.append(_event("ERROR", message))
+        worker_result = locals().get("worker_result", {})
+        raw_response = worker_result.get("response") if isinstance(worker_result, dict) else None
+        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and "response" in worker_result else ""
+        return run.model_copy(update={
+            "status": WorkflowNodeRunStatus.FAILED,
+            "finished_at": utc_now_iso(),
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "input_snapshot": input_snapshot,
+            "request_body": logged_request,
+            "events": events,
+            "output": raw_response,
+            "stdout": str(worker_result.get("stdout", "")) if isinstance(worker_result, dict) else "",
+            "stderr": str(worker_result.get("stderr", "")) if isinstance(worker_result, dict) else "",
+            "response_body": response_body,
+            "http_status": worker_result.get("http_status") if isinstance(worker_result, dict) else None,
+            "error": {
+                "type": type(exc).__name__,
+                "message": message,
+                "traceback": traceback.format_exc(),
+            },
+        })
+
+
 def _node_label(node: dict[str, Any]) -> str:
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
     label = data.get("label")
@@ -281,6 +468,11 @@ async def run_llm_node(
     workflow = get_workflow_or_404(workflow_id)
     node = _find_node(workflow, node_id)
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    if data.get("nodeType") in {"HTTP", "AGENT", "SCRIPT"}:
+        repository = get_repository()
+        run = await _run_python_or_http_node(workflow, node, repository)
+        repository.finish_run(run)
+        return WorkflowNodeRunEnvelope(run=run)
     provider_id = data.get("providerId") if isinstance(data.get("providerId"), str) else ""
     model_name = data.get("modelName") if isinstance(data.get("modelName"), str) else ""
     system_prompt = data.get("systemPrompt") if isinstance(data.get("systemPrompt"), str) else ""

@@ -1172,6 +1172,65 @@ T13.2.1-T13.2.6 已完成
 - 测试数据清理：真实 E2E 临时 Workflow `fe539097aaca4befbd2c049abe0990ef` 已通过删除 API 清理，随后 GET 返回 `404`。
 - 发布结果：功能与测试改造已提交为 `8d405e9`（`Add persistent LLM workflow execution`），并成功推送到 `origin/codex/tool-template-refactor`；随后本计划收口记录单独提交并同步推送。
 
+#### Step 13：Script 节点参数页签收敛（completed，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- Script 节点的“参数”页签当前只展示只读的 `parameterRecords` 快照，不负责配置脚本输入；在真实编辑场景中通常为空，并与变量面板、日志详情形成重复入口。
+- 本步骤目标是让 Workflow 作者在 Script 节点内按实际工作流完成三件事：在“代码”页编写脚本，在右上角变量面板核对可引用值，在“设置 → 输出变量”声明下游变量；执行结果和错误统一进入“日志”。
+
+##### 用户与真实场景（Who / Where）
+
+- 用户：编排评测 Workflow 的业务或测试工程师。
+- 场景：用户双击 Script 节点修改 `main.py`，需要查看上游输出并确认脚本结果；此时参数快照既不能编辑输入，也不能替代日志和变量面板。
+
+##### 需求范围与优先级（What / When）
+
+- 高优先级、前端交互收敛：Script 编辑器只保留“设置 / 代码 / 日志”三页。
+- “设置”继续保留名称、说明、运行配置和输出变量；“代码”继续保留 `main.py`；“日志”继续保留运行状态、结果和错误。
+- 右上角变量面板继续作为 Script 调试输入的唯一查看入口；不新增一套参数映射 UI。
+- 共享 `parameterRecords` 数据结构暂不删除，因为 HTTP / AGENT 仍使用参数查看能力；本步骤不改后端运行协议、不改变历史草稿读取。
+- 已确认 `1A 2A`：本步骤同时为 `HTTP / AGENT / LLM / SCRIPT` 接入真实执行；日志按“原始请求 / 原始 stdout / 原始 response / 原始 stderr 与 traceback”分区展示，但不改写原始文本；输出变量只能依据原始 `request / response` 结构提取。
+
+##### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 13.1 | 原始日志持久化 | Worker stdout/stderr；运行记录新增原始流字段 | Worker 流归属、SQLite 重启回读、10 条保留 | 无 |
+| 13.2 | 四类真实执行 | HTTP 配置、AGENT/SCRIPT `main.py`、LLM 网关 | 四类成功/失败、request/response 提取、无密钥日志 | 13.1 |
+| 13.3 | 统一日志 UI | 四类运行记录 | 浏览器展开原始四区、错误定位、节点状态 | 13.2 |
+| 13.4 | 集成发布 | 完整 Workflow Studio | 全量 pytest、构建、真实浏览器、推送 | 13.1-13.3 |
+
+##### 验收标准与价值验证（How to Measure）
+
+- Script 节点编辑器不显示“参数”按钮，且节点切换或旧状态恢复时不会渲染参数面板。
+- Script 的“设置 / 代码 / 日志”、变量按钮和输出变量配置均可正常使用；HTTP / AGENT 的参数页签保持不变。
+- `npm run build`、专项前端测试和真实浏览器双击 Script 流程通过，桌面布局无重叠或横向溢出。
+- 实现进度：已加入 `isScript / showParametersTab` 路由判定；切换节点时重置到 `initialTab`，避免从 HTTP/AGENT 参数页切换到 Script 后残留隐藏面板。`npm run build` 成功，`uv run pytest tests/test_execution_frontend.py -q` 为 `8 passed, 1 warning`，`node --check web/static/assets/workflow-canvas.js` 通过。
+- 13.1 已完成：`WorkflowNodeRunRecord` 增加 `stdout/stderr`，SQLite 自动迁移 `stdout_body/stderr_body`；Worker 事件携带原始流来源并分别收集。`uv run pytest tests/test_tool_execution.py tests/test_workflow_drafts.py -q` 为 `15 passed, 1 warning`，Python 编译通过。
+- 13.2 已完成：HTTP 使用真实请求配置进入 Worker，AGENT/SCRIPT 使用真实 `main.py` 子进程；四类节点统一按 `request / response` 提取输出变量。成功/失败均保存原始 stdout、stderr、response 和 traceback，HTTP 非 2xx 保留原始响应。专项 `uv run pytest tests/test_workflow_node_runs.py -q` 为 `5 passed, 1 warning`，与既有 LLM/Worker/草稿专项合计 `24 passed, 1 warning`。
+- 13.3 已完成：四类节点共用可展开运行历史，摘要显示日期、状态、耗时和最终结果；详情按原始请求、stdout、response、stderr、traceback 分区展示，空区不伪造内容，保留原始文本。运行入口与日志加载扩展到 HTTP/AGENT/LLM/SCRIPT。`npm run build`、`node --check web/static/assets/workflow-canvas.js` 和 `uv run pytest tests/test_execution_frontend.py -q`（`8 passed, 1 warning`）通过；节点执行专项现为 `6 passed, 1 warning`。
+- 13.4 已完成：浏览器真实 Script 成功运行以 `212ms` 进入 `PASSED`，展开日志显示原始 request/stdout/response/stderr，并提取 `browser_value=浏览器回归`；失败运行以 `222ms` 进入 `FAILED`，保留执行前 stdout、用户 stderr、Worker traceback 和路由 traceback。全量回归 `177 passed, 6 skipped, 1 warning in 16.92s`，构建、Python/JS 静态检查和 `git diff --check` 通过；临时 Workflow 删除后 GET 为 `404`。
+
+#### Step 14：Workflow 与节点中断控制（pending clarification，2026-07-22）
+
+##### 业务背景与目标（Why）
+
+- 当前画布运行会按定时器触发节点，运行按钮可重复点击，后端节点请求没有可由画布调用的统一取消协议；长耗时测试容易重复消耗资源，也无法在发现配置错误后及时停止。
+- 目标是在画布级和节点级提供一致的运行锁、中断入口、耗时计时与可重新运行能力，同时保证中断后的执行范围可预测。
+
+##### 已确认需求（What）
+
+- 画布运行期间禁用重复运行；运行按钮左侧显示累计计时器；顶部“全局变量”右侧和画布右键菜单均提供中断入口；中断后可重新从头运行。
+- 节点运行期间禁用该节点所有运行入口；节点卡片、节点右键菜单和编辑器标题栏均提供中断入口；未运行或已结束节点点击中断不改变状态；中断后可重新运行节点。
+- 节点中断后，本次 Workflow 中该节点的后续节点不再执行；四类节点的原始日志和错误追溯规则继续适用。
+
+##### 实现前必须确认
+
+- 中断节点在既定四状态中显示 `FAILED` 还是恢复 `PENDING`。
+- 在分支 Workflow 中，“后续节点”是仅指被中断节点的图后代，还是停止本次 Workflow 的所有剩余节点。
+- 当前按横坐标定时触发的画布演示调度是否在本步骤升级为依据连线的真实 DAG 调度。
+
 ## 22. 待优化项目
 
 ### 22.1 独立凭据仓储与绑定

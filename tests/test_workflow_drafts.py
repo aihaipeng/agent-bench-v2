@@ -59,6 +59,8 @@ def _finished_run(workflow_id: str, sequence: int) -> WorkflowNodeRunRecord:
         request_body={"model": "deepseek-v4-pro", "messages": []},
         events=[{"level": "INFO", "message": "运行完成"}],
         output={"answer": sequence},
+        stdout=f"stdout-{sequence}\n",
+        stderr=f"stderr-{sequence}\n",
         usage={"total_tokens": sequence},
         http_status=200,
         request_id=f"request-{sequence}",
@@ -91,6 +93,8 @@ def test_workflow_draft_repository_restart_retention_and_cascade(tmp_path):
     assert len(runs) == NODE_RUN_HISTORY_LIMIT
     assert [run.id for run in runs] == [f"run-{value:02d}" for value in range(10, 0, -1)]
     assert runs[0].output == {"answer": 10}
+    assert runs[0].stdout == "stdout-10\n"
+    assert runs[0].stderr == "stderr-10\n"
 
     assert restarted.delete_draft(workflow.id) is True
     assert restarted.list_node_runs(workflow.id, "llm-1") == []

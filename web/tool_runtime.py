@@ -159,12 +159,22 @@ def stream_tool_worker(
     if timeout_seconds <= 0:
         raise ToolExecutionError("执行超时必须大于 0 秒")
     normalized_payload = _json_clone(payload, "Worker payload")
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    def with_streams(result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **result,
+            "stdout": "".join(stdout_parts),
+            "stderr": "".join(stderr_parts),
+        }
+
     state = _prepare_execution(run_id)
     process: subprocess.Popen[bytes] | None = None
     try:
         with state.lock:
             if state.interrupted:
-                return {"ok": False, "interrupted": True}
+                return with_streams({"ok": False, "interrupted": True})
             process = subprocess.Popen(
                 [sys.executable, "-m", "web.tool_worker"],
                 stdin=subprocess.PIPE,
@@ -214,13 +224,15 @@ def stream_tool_worker(
             with state.lock:
                 if state.interrupted:
                     process.wait(timeout=5)
-                    return {"ok": False, "interrupted": True}
+                    return with_streams({"ok": False, "interrupted": True})
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                on_log(f"执行超时，已终止子进程（{timeout_seconds:g} 秒）\n")
+                message = f"执行超时，已终止子进程（{timeout_seconds:g} 秒）\n"
+                stderr_parts.append(message)
+                on_log(message)
                 _terminate_process_tree(process)
                 process.wait(timeout=5)
-                return {"ok": False, "timed_out": True}
+                return with_streams({"ok": False, "timed_out": True})
             try:
                 source, raw_line = output_queue.get(timeout=min(0.1, remaining))
             except queue.Empty:
@@ -229,22 +241,29 @@ def stream_tool_worker(
                 closed_sources.add(source)
                 continue
             if source == "stderr":
-                on_log(raw_line.decode("utf-8", errors="replace"))
+                text = raw_line.decode("utf-8", errors="replace")
+                stderr_parts.append(text)
+                on_log(text)
                 continue
             for event in _parse_worker_line(raw_line):
                 if event.get("type") == "log":
-                    on_log(str(event.get("text", "")))
+                    text = str(event.get("text", ""))
+                    stream = event.get("stream", "stdout")
+                    (stderr_parts if stream == "stderr" else stdout_parts).append(text)
+                    on_log(text)
                 elif event.get("type") == "result" and isinstance(event.get("result"), dict):
                     result = event["result"]
 
         process.wait(timeout=5)
         with state.lock:
             if state.interrupted:
-                return {"ok": False, "interrupted": True}
+                return with_streams({"ok": False, "interrupted": True})
         if result is None:
-            on_log("Worker 未返回执行结果\n")
-            return {"ok": False}
-        return result
+            message = "Worker 未返回执行结果\n"
+            stderr_parts.append(message)
+            on_log(message)
+            return with_streams({"ok": False})
+        return with_streams(result)
     finally:
         if process is not None and process.poll() is None:
             _terminate_process_tree(process)

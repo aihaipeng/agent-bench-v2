@@ -19,8 +19,8 @@ def test_execution_assets_and_navigation_are_registered():
     assert 'data-view="runs"' not in index_html
     assert "运行中心" not in index_html
     assert '<link rel="stylesheet" href="/execution.css" />' in index_html
-    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=26" />' in index_html
-    assert '<script src="/assets/workflow-canvas.js?v=26"></script>' in index_html
+    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=27" />' in index_html
+    assert '<script src="/assets/workflow-canvas.js?v=27"></script>' in index_html
     assert '<script src="/execution.js"></script>' in index_html
     assert 'name="viewport"' not in index_html
     assert "viewTargets();" in app_js
@@ -194,7 +194,11 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "setNodeSaveNotice" in canvas_jsx
     assert "wf-node-saved-state" in canvas_jsx
     assert "setEditorInitialTab" not in canvas_jsx
-    assert "!isLlm && <button type=\"button\" className={tab === 'parameters'" in canvas_jsx
+    assert "setTab(initialTab)" in canvas_jsx
+    assert "const isScript = node.data.nodeType === 'SCRIPT'" in canvas_jsx
+    assert "const showParametersTab = !isLlm && !isScript" in canvas_jsx
+    assert "showParametersTab && <button type=\"button\" className={tab === 'parameters'" in canvas_jsx
+    assert "tab === 'parameters' && showParametersTab" in canvas_jsx
     assert 'role="columnheader">source' in canvas_jsx
     assert 'role="columnheader">name' in canvas_jsx
     assert 'role="columnheader">data' in canvas_jsx
@@ -351,12 +355,17 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "请选择有效模型、填写用户提示词并修正高级参数" in canvas_jsx
     assert "meta.executable && !isLlm" in canvas_jsx
     assert "!isLlm && <button" in canvas_jsx
-    assert "<LlmRunHistory runs={node.data.runHistory || []} />" in canvas_jsx
+    assert "<NodeRunHistory runs={node.data.runHistory || []} nodeType={node.data.nodeType} />" in canvas_jsx
     assert ".slice(0, 10)" in canvas_jsx
     assert "formatRunDate(run.finished_at || run.started_at)" in canvas_jsx
     assert "原始响应" in canvas_jsx
-    assert "原始错误" in canvas_jsx
+    assert "原始 stderr" in canvas_jsx
     assert "run.response_body" in canvas_jsx
+    assert "原始请求" in canvas_jsx
+    assert "原始 stdout" in canvas_jsx
+    assert "原始 response" in canvas_jsx
+    assert "原始 stderr" in canvas_jsx
+    assert "错误 traceback" in canvas_jsx
     assert "输入快照" not in canvas_jsx
     assert "Token usage" not in canvas_jsx
     assert 'role="switch" aria-label="流式输出"' in canvas_jsx
@@ -364,7 +373,7 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "setStreamMode(event.target.checked)" in canvas_jsx
     assert "const showOutputVariables = !isLlm || !streamEnabled" in canvas_jsx
     assert "{showOutputVariables && (" in canvas_jsx
-    assert "const streaming = targetNode.data.modelParameters?.stream === true" in canvas_jsx
+    assert "const streaming = targetNode.data.nodeType === 'LLM' && targetNode.data.modelParameters?.stream === true" in canvas_jsx
     assert "const suffix = streaming ? '/runs/stream' : '/runs'" in canvas_jsx
     assert 'aria-label="查看节点变量"' in canvas_jsx
     assert 'aria-label="节点可用变量"' in canvas_jsx
@@ -379,6 +388,7 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "/variables`" in canvas_jsx
     assert "persistDraft()" in canvas_jsx
     assert "/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}/runs" in canvas_jsx
+    assert "['HTTP', 'AGENT', 'LLM', 'SCRIPT'].includes(targetNode?.data.nodeType)" in canvas_jsx
     assert "apiKey" not in canvas_jsx
     assert "api_key" not in canvas_jsx
     assert "model_kwargs" not in canvas_jsx

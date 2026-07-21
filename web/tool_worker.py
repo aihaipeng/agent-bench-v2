@@ -18,6 +18,13 @@ _RESPONSE_ADAPTER = TypeAdapter(Any)
 _STREAM_EVENT_PREFIX = "\x1e"
 
 
+class _HttpResponseError(RuntimeError):
+    def __init__(self, status_code: int, response: dict[str, Any]) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+        self.response = response
+
+
 def _emit_event(event: dict[str, Any]) -> None:
     sys.__stdout__.buffer.write(
         (
@@ -33,7 +40,8 @@ class _LineWriter:
     encoding = "utf-8"
     errors = "replace"
 
-    def __init__(self) -> None:
+    def __init__(self, stream: str) -> None:
+        self.stream = stream
         self._pending = ""
         self._lock = threading.Lock()
 
@@ -45,7 +53,7 @@ class _LineWriter:
                 end = self._pending.index("\n") + 1
                 line = self._pending[:end]
                 self._pending = self._pending[end:]
-                _emit_event({"type": "log", "text": line})
+                _emit_event({"type": "log", "stream": self.stream, "text": line})
         return len(text)
 
     def flush(self) -> None:
@@ -53,7 +61,7 @@ class _LineWriter:
             if self._pending:
                 pending = self._pending
                 self._pending = ""
-                _emit_event({"type": "log", "text": pending})
+                _emit_event({"type": "log", "stream": self.stream, "text": pending})
 
     def isatty(self) -> bool:
         return False
@@ -128,16 +136,18 @@ def _execute_http(payload: dict[str, Any]) -> Any:
     elif body_type == "BINARY":
         kwargs["content"] = body.encode("utf-8") if isinstance(body, str) else bytes(body or [])
     response = httpx.request(request["method"], request["url"], **kwargs)
-    response.raise_for_status()
     try:
         response_body = response.json()
     except ValueError:
         response_body = response.text
-    return {
+    result = {
         "status_code": response.status_code,
         "headers": dict(response.headers),
         "body": response_body,
     }
+    if not response.is_success:
+        raise _HttpResponseError(response.status_code, result)
+    return result
 
 
 def main() -> None:
@@ -151,8 +161,8 @@ def main() -> None:
         _emit_event({"type": "result", "result": {"ok": False, "error": str(exc)}})
         return
 
-    stdout_writer = _LineWriter()
-    stderr_writer = _LineWriter()
+    stdout_writer = _LineWriter("stdout")
+    stderr_writer = _LineWriter("stderr")
     try:
         with redirect_stdout(stdout_writer), redirect_stderr(stderr_writer):
             if payload.get("mode") == "HTTP_CONFIG":
@@ -170,6 +180,9 @@ def main() -> None:
         stdout_writer.flush()
         stderr_writer.flush()
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(exc, _HttpResponseError):
+            result["response"] = _serialize_response(exc.response)
+            result["http_status"] = exc.status_code
     _emit_event({"type": "result", "result": result})
 
 

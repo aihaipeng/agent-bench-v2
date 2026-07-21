@@ -29,7 +29,12 @@ def test_python_worker_shares_inputs_config_response_protocol():
 
     result = stream_tool_worker(payload, logs.append, "run-python")
 
-    assert result == {"ok": True, "response": {"value": "Workflow!"}}
+    assert result == {
+        "ok": True,
+        "response": {"value": "Workflow!"},
+        "stdout": "working",
+        "stderr": "",
+    }
     assert "".join(logs) == "working"
 
 
@@ -46,6 +51,7 @@ def test_python_worker_rejects_non_json_response_and_reports_traceback():
     assert "NaN" in result["error"]
     assert "Infinity" in result["error"]
     assert "Traceback" in "".join(logs)
+    assert "Traceback" in result["stderr"]
 
 
 def test_python_worker_timeout_terminates_process():
@@ -58,7 +64,12 @@ def test_python_worker_timeout_terminates_process():
         timeout_seconds=0.2,
     )
 
-    assert result == {"ok": False, "timed_out": True}
+    assert result == {
+        "ok": False,
+        "timed_out": True,
+        "stdout": "",
+        "stderr": "执行超时，已终止子进程（0.2 秒）\n",
+    }
     assert "执行超时" in "".join(logs)
     assert not is_tool_run_active("run-timeout")
 
@@ -84,7 +95,12 @@ def test_python_worker_can_be_interrupted():
     assert interrupt_tool_run("run-interrupt") is True
     thread.join(timeout=5)
 
-    assert holder["result"] == {"ok": False, "interrupted": True}
+    assert holder["result"] == {
+        "ok": False,
+        "interrupted": True,
+        "stdout": "",
+        "stderr": "",
+    }
     assert not is_tool_run_active("run-interrupt")
 
 

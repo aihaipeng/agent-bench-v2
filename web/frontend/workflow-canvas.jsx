@@ -610,17 +610,17 @@ function ModelSelector({
     );
 }
 
-function LlmRunHistory({runs}) {
+function NodeRunHistory({runs, nodeType}) {
     const [expandedRunId, setExpandedRunId] = useState(null);
     if (!runs.length) return <div className="wf-node-log-empty">暂无运行日志</div>;
     return (
         <div className="wf-llm-run-list">
             {runs.slice(0, 10).map((run) => {
                 const expanded = expandedRunId === run.id;
-                const rawContent = run.response_body
-                    || run.error?.traceback
-                    || run.error?.message
-                    || '';
+                const requestContent = run.request_body && Object.keys(run.request_body).length
+                    ? parameterDataText(run.request_body, true)
+                    : '';
+                const tracebackContent = run.error?.traceback || '';
                 return (
                     <article className={`wf-llm-run is-${String(run.status || 'FAILED').toLowerCase()}`} key={run.id}>
                         <button type="button" className="wf-llm-run-summary" aria-expanded={expanded} onClick={() => setExpandedRunId(expanded ? null : run.id)}>
@@ -633,11 +633,15 @@ function LlmRunHistory({runs}) {
                         {expanded && (
                             <div className="wf-llm-run-detail">
                                 <div className="wf-llm-run-meta">
-                                    <span>{run.provider_name || '未知供应商'} / {run.model_name || '未知模型'}</span>
+                                    <span>{run.provider_name ? `${run.provider_name} / ${run.model_name || '未知模型'}` : nodeType}</span>
                                     {run.http_status && <span>HTTP {run.http_status}</span>}
                                     {run.request_id && <code>{run.request_id}</code>}
                                 </div>
-                                <section className={run.status === 'FAILED' ? 'is-error' : ''}><strong>{run.status === 'FAILED' ? '原始错误' : '原始响应'}</strong><pre>{rawContent}</pre></section>
+                                {requestContent && <section><strong>原始请求</strong><pre>{requestContent}</pre></section>}
+                                {run.stdout && <section><strong>原始 stdout</strong><pre>{run.stdout}</pre></section>}
+                                {run.response_body && <section><strong>原始 response</strong><pre>{run.response_body}</pre></section>}
+                                {run.stderr && <section className="is-error"><strong>原始 stderr</strong><pre>{run.stderr}</pre></section>}
+                                {tracebackContent && <section className="is-error"><strong>错误 traceback</strong><pre>{tracebackContent}</pre></section>}
                             </div>
                         )}
                     </article>
@@ -680,6 +684,7 @@ function Inspector({
     const [editorScale, setEditorScale] = useState(1);
     const editorBaseSizeRef = useRef(null);
     useEffect(() => {
+        setTab(initialTab);
         setCurlPanelOpen(false);
         setCurlText('');
         setCurlError('');
@@ -698,12 +703,14 @@ function Inspector({
         setVariableLoadError('');
         editorBaseSizeRef.current = null;
         setEditorScale(1);
-    }, [node?.id]);
+    }, [node?.id, initialTab]);
     if (!node) return null;
     const meta = NODE_TYPES[node.data.nodeType] || NODE_TYPES.SCRIPT;
     const Icon = meta.icon;
     const isHttp = node.data.nodeType === 'HTTP';
     const isLlm = node.data.nodeType === 'LLM';
+    const isScript = node.data.nodeType === 'SCRIPT';
+    const showParametersTab = !isLlm && !isScript;
     const streamEnabled = isLlm && node.data.modelParameters?.stream === true;
     const showOutputVariables = !isLlm || !streamEnabled;
     const modelReference = modelReferenceStatus(
@@ -942,7 +949,7 @@ function Inspector({
                 <div className="wf-inspector-tabs">
                     <button type="button" className={tab === 'settings' ? 'is-active' : ''} onClick={() => setTab('settings')}>设置</button>
                     {meta.executable && !isLlm && <button type="button" className={tab === 'code' ? 'is-active' : ''} onClick={() => setTab('code')}>代码</button>}
-                    {!isLlm && <button type="button" className={tab === 'parameters' ? 'is-active' : ''} onClick={() => setTab('parameters')}>参数</button>}
+                    {showParametersTab && <button type="button" className={tab === 'parameters' ? 'is-active' : ''} onClick={() => setTab('parameters')}>参数</button>}
                     <button type="button" className={tab === 'logs' ? 'is-active' : ''} onClick={() => setTab('logs')}>日志</button>
                 </div>
                 {tab === 'settings' ? (
@@ -1084,7 +1091,7 @@ function Inspector({
                         <div className="wf-code-meta"><span>main.py</span><span>Python</span></div>
                         <textarea aria-label="main.py" spellCheck="false" value={node.data.mainPy ?? DEFAULT_MAIN_PY} onChange={(event) => onChange({mainPy: event.target.value})} />
                     </div>
-                ) : tab === 'parameters' ? (
+                ) : tab === 'parameters' && showParametersTab ? (
                     <div className="wf-inspector-body wf-parameter-panel">
                         <div className="wf-parameter-table" role="table" aria-label="节点运行参数">
                             <div className="wf-parameter-row wf-parameter-heading" role="row">
@@ -1121,11 +1128,7 @@ function Inspector({
                     </div>
                 ) : (
                     <div className="wf-inspector-body wf-node-log-panel">
-                        {isLlm ? (
-                            <LlmRunHistory runs={node.data.runHistory || []} />
-                        ) : (node.data.runHistory || []).length ? node.data.runHistory.map((entry) => (
-                            <div className="wf-legacy-run" key={entry.id}><time>{entry.time}</time><strong>{entry.status}</strong><span>{entry.message}</span></div>
-                        )) : <div className="wf-node-log-empty">暂无日志</div>}
+                        <NodeRunHistory runs={node.data.runHistory || []} nodeType={node.data.nodeType} />
                     </div>
                 )}
               </aside>
@@ -1297,7 +1300,7 @@ function WorkflowStudio({options}) {
 
     useEffect(() => {
         const targetNode = nodes.find((node) => node.id === editorNodeId);
-        if (targetNode?.data.nodeType === 'LLM' && workflowId) {
+        if (['HTTP', 'AGENT', 'LLM', 'SCRIPT'].includes(targetNode?.data.nodeType) && workflowId) {
             loadNodeRuns(targetNode.id);
         }
     }, [editorNodeId, loadNodeRuns, workflowId]);
@@ -1307,8 +1310,8 @@ function WorkflowStudio({options}) {
         const startedAtMs = Date.now();
         const executionId = rowId();
         const targetNode = nodes.find((node) => node.id === id);
-        if (targetNode?.data.nodeType === 'LLM') {
-            const streaming = targetNode.data.modelParameters?.stream === true;
+        if (['HTTP', 'AGENT', 'LLM', 'SCRIPT'].includes(targetNode?.data.nodeType)) {
+            const streaming = targetNode.data.nodeType === 'LLM' && targetNode.data.modelParameters?.stream === true;
             let activeWorkflowId;
             try {
                 activeWorkflowId = await persistDraft();

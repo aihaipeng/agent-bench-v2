@@ -99,6 +99,8 @@ class WorkflowNodeRunRecord(_WorkflowModel):
     request_body: dict[str, Any] = Field(default_factory=dict)
     events: list[dict[str, Any]] = Field(default_factory=list)
     output: Any = None
+    stdout: str = ""
+    stderr: str = ""
     response_body: str = ""
     output_variables: dict[str, Any] = Field(default_factory=dict)
     usage: dict[str, Any] | None = None
@@ -161,6 +163,8 @@ class WorkflowDraftRepository:
                         request_body_json TEXT NOT NULL,
                         events_json TEXT NOT NULL,
                         output_json TEXT NOT NULL,
+                        stdout_body TEXT NOT NULL DEFAULT '',
+                        stderr_body TEXT NOT NULL DEFAULT '',
                         response_body TEXT NOT NULL DEFAULT '',
                         output_variables_json TEXT NOT NULL DEFAULT '{}',
                         usage_json TEXT,
@@ -188,6 +192,16 @@ class WorkflowDraftRepository:
                     connection.execute(
                         "ALTER TABLE workflow_node_runs "
                         "ADD COLUMN response_body TEXT NOT NULL DEFAULT ''"
+                    )
+                if "stdout_body" not in columns:
+                    connection.execute(
+                        "ALTER TABLE workflow_node_runs "
+                        "ADD COLUMN stdout_body TEXT NOT NULL DEFAULT ''"
+                    )
+                if "stderr_body" not in columns:
+                    connection.execute(
+                        "ALTER TABLE workflow_node_runs "
+                        "ADD COLUMN stderr_body TEXT NOT NULL DEFAULT ''"
                     )
                 if "output_variables_json" not in columns:
                     connection.execute(
@@ -273,10 +287,11 @@ class WorkflowDraftRepository:
                     INSERT INTO workflow_node_runs(
                         id, workflow_id, node_id, status, started_at, finished_at,
                         duration_ms, provider_name, model_name, input_snapshot_json,
-                        request_body_json, events_json, output_json, response_body,
+                        request_body_json, events_json, output_json,
+                        stdout_body, stderr_body, response_body,
                         output_variables_json, usage_json, error_json, http_status,
                         request_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     self._run_values(values),
                 )
@@ -295,7 +310,8 @@ class WorkflowDraftRepository:
                 UPDATE workflow_node_runs SET
                     status = ?, finished_at = ?, duration_ms = ?, provider_name = ?,
                     model_name = ?, input_snapshot_json = ?, request_body_json = ?,
-                    events_json = ?, output_json = ?, response_body = ?,
+                    events_json = ?, output_json = ?, stdout_body = ?,
+                    stderr_body = ?, response_body = ?,
                     output_variables_json = ?, usage_json = ?, error_json = ?,
                     http_status = ?, request_id = ?
                 WHERE id = ? AND workflow_id = ? AND node_id = ?
@@ -305,7 +321,8 @@ class WorkflowDraftRepository:
                     values["provider_name"], values["model_name"],
                     _json_dump(values["input_snapshot"]),
                     _json_dump(values["request_body"]), _json_dump(values["events"]),
-                    _json_dump(values["output"]), values["response_body"],
+                    _json_dump(values["output"]), values["stdout"], values["stderr"],
+                    values["response_body"],
                     _json_dump(values["output_variables"]),
                     _json_dump_optional(values["usage"]),
                     _json_dump_optional(values["error"]), values["http_status"],
@@ -389,7 +406,8 @@ class WorkflowDraftRepository:
             values["duration_ms"], values["provider_name"], values["model_name"],
             _json_dump(values["input_snapshot"]), _json_dump(values["request_body"]),
             _json_dump(values["events"]), _json_dump(values["output"]),
-            values["response_body"], _json_dump(values["output_variables"]),
+            values["stdout"], values["stderr"], values["response_body"],
+            _json_dump(values["output_variables"]),
             _json_dump_optional(values["usage"]), _json_dump_optional(values["error"]),
             values["http_status"], values["request_id"],
         )
@@ -404,6 +422,7 @@ class WorkflowDraftRepository:
             input_snapshot=json.loads(row["input_snapshot_json"]),
             request_body=json.loads(row["request_body_json"]),
             events=json.loads(row["events_json"]), output=json.loads(row["output_json"]),
+            stdout=row["stdout_body"], stderr=row["stderr_body"],
             response_body=row["response_body"],
             output_variables=json.loads(row["output_variables_json"]),
             usage=_json_load_optional(row["usage_json"]),
