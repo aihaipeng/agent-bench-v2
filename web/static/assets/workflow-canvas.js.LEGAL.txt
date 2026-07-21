@@ -103,8 +103,9 @@ lucide-react/dist/esm/icons/loader-circle.js:
 lucide-react/dist/esm/icons/play.js:
 lucide-react/dist/esm/icons/plus.js:
 lucide-react/dist/esm/icons/redo-2.js:
+lucide-react/dist/esm/icons/refresh-cw.js:
 lucide-react/dist/esm/icons/save.js:
-lucide-react/dist/esm/icons/server-cog.js:
+lucide-react/dist/esm/icons/search.js:
 lucide-react/dist/esm/icons/settings-2.js:
 lucide-react/dist/esm/icons/sliders-horizontal.js:
 lucide-react/dist/esm/icons/sparkles.js:

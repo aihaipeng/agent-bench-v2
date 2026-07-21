@@ -1,4 +1,4 @@
-"""Cancellable subprocess runtime for all tool template executions."""
+"""Cancellable subprocess runtime shared by Workflow node executions."""
 
 from __future__ import annotations
 

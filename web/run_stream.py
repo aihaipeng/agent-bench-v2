@@ -1,4 +1,4 @@
-"""In-memory event streams for local tool template executions."""
+"""In-memory event streams for local Workflow node executions."""
 
 from __future__ import annotations
 

@@ -19,8 +19,8 @@ def test_execution_assets_and_navigation_are_registered():
     assert 'data-view="runs"' not in index_html
     assert "运行中心" not in index_html
     assert '<link rel="stylesheet" href="/execution.css" />' in index_html
-    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=21" />' in index_html
-    assert '<script src="/assets/workflow-canvas.js?v=21"></script>' in index_html
+    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=23" />' in index_html
+    assert '<script src="/assets/workflow-canvas.js?v=23"></script>' in index_html
     assert '<script src="/execution.js"></script>' in index_html
     assert 'name="viewport"' not in index_html
     assert "viewTargets();" in app_js
@@ -284,7 +284,7 @@ def test_http_node_editor_has_api_import_and_body_controls():
     assert ".wf-http-code-editor" in canvas_css
 
 
-def test_canvas_deep_copies_uppercase_tool_templates_without_source_reference():
+def test_canvas_defines_tool_nodes_only_inside_workflow():
     canvas_jsx = (
         STATIC_DIR.parent / "frontend" / "workflow-canvas.jsx"
     ).read_text(encoding="utf-8")
@@ -292,31 +292,49 @@ def test_canvas_deep_copies_uppercase_tool_templates_without_source_reference():
         STATIC_DIR.parent / "frontend" / "workflow-canvas.css"
     ).read_text(encoding="utf-8")
 
-    assert "fetch('/api/tool-templates')" in canvas_jsx
-    assert "工具模板" in canvas_jsx
-    assert "const definition = cloneValue(template.definition)" in canvas_jsx
-    assert "templateDefinition: definition" in canvas_jsx
-    assert "mainPy: template.main_py" in canvas_jsx
     assert "const DEFAULT_MAIN_PY = 'response = inputs'" in canvas_jsx
     assert "value={node.data.mainPy ?? DEFAULT_MAIN_PY}" in canvas_jsx
     assert "onChange={(event) => onChange({mainPy: event.target.value})}" in canvas_jsx
-    assert "httpConfig: httpConfigFromTemplate(definition)" in canvas_jsx
-    assert "sourceTemplateId" not in canvas_jsx
-    assert "template.manifest.id," not in canvas_jsx
-    assert ".wf-template-popover" in canvas_css
-    assert ".wf-template-list" in canvas_css
+    assert "makeNode(type, position)" in canvas_jsx
+    assert "type === 'HTTP' ? {httpConfig: defaultHttpConfig()}" in canvas_jsx
+    for removed in (
+        "/api/tool-templates",
+        "工具模板",
+        "发布为工具模板",
+        "toolTemplates",
+        "templateLoadState",
+        "templateDefinition",
+        "httpConfigFromTemplate",
+        "publishNode",
+    ):
+        assert removed not in canvas_jsx
+    assert ".wf-template-popover" not in canvas_css
+    assert ".wf-template-list" not in canvas_css
 
 
-def test_canvas_publishes_nodes_as_independent_new_templates():
+def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     canvas_jsx = (
         STATIC_DIR.parent / "frontend" / "workflow-canvas.jsx"
     ).read_text(encoding="utf-8")
+    canvas_css = (
+        STATIC_DIR.parent / "frontend" / "workflow-canvas.css"
+    ).read_text(encoding="utf-8")
 
-    assert "function templateDefinitionFromNode(node)" in canvas_jsx
-    assert "function objectFromRows(rows)" in canvas_jsx
-    assert "发布为工具模板" in canvas_jsx
-    assert "fetch('/api/tool-templates/publish'" in canvas_jsx
-    assert "definition: templateDefinitionFromNode(node)" in canvas_jsx
-    assert "main_py: node.data.mainPy ?? null" in canvas_jsx
-    assert "setToolTemplates((current) => [data.template].concat(current))" in canvas_jsx
-    assert "sourceTemplateId" not in canvas_jsx
+    assert "...(type === 'LLM' ? {providerId: '', modelName: '', modelParameters: {}} : {})" in canvas_jsx
+    assert "fetch('/api/model-providers'" in canvas_jsx
+    assert "function ModelSelector(" in canvas_jsx
+    assert 'placeholder="搜索供应商或模型"' in canvas_jsx
+    assert 'role="option"' in canvas_jsx
+    assert "onSelect(provider.id, model)" in canvas_jsx
+    assert "模型已失效" in canvas_jsx
+    assert 'aria-label="模型高级参数 JSON"' in canvas_jsx
+    assert "if (!isPlainObject(parsed))" in canvas_jsx
+    assert "onChange({modelParameters: parsed})" in canvas_jsx
+    assert "请先选择有效模型并修正高级参数" in canvas_jsx
+    assert "apiKey" not in canvas_jsx
+    assert "api_key" not in canvas_jsx
+    assert "model_kwargs" not in canvas_jsx
+    assert ".wf-model-picker" in canvas_css
+    assert ".wf-model-provider-group" in canvas_css
+    assert ".wf-model-option.is-selected" in canvas_css
+    assert "@media" not in canvas_css

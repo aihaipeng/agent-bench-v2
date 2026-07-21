@@ -230,77 +230,6 @@ body.workflow-studio-open {
     background: #eef2f7;
 }
 
-.wf-template-popover {
-    width: 360px;
-}
-
-.wf-template-list {
-    display: grid;
-    gap: 6px;
-    padding: 10px;
-    max-height: 420px;
-    overflow: auto;
-}
-
-.wf-template-list > button {
-    display: grid;
-    grid-template-columns: 34px minmax(0, 1fr);
-    align-items: center;
-    gap: 10px;
-    min-height: 48px;
-    padding: 7px 9px;
-    border: 1px solid #d8e0ea;
-    border-radius: 6px;
-    background: #ffffff;
-    color: #172033;
-    text-align: left;
-    cursor: pointer;
-}
-
-.wf-template-list > button:hover {
-    border-color: #16a34a;
-    background: #f0fdf4;
-}
-
-.wf-template-list > button > span:last-child {
-    display: grid;
-    min-width: 0;
-}
-
-.wf-template-list strong,
-.wf-template-list small {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    letter-spacing: 0;
-}
-
-.wf-template-list small {
-    margin-top: 3px;
-    color: #667085;
-    font-size: 11px;
-}
-
-.wf-template-icon {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
-    color: var(--template-accent);
-    background: #f4f7fa;
-}
-
-.wf-template-empty {
-    padding: 24px 12px;
-    color: #667085;
-    text-align: center;
-}
-
-.wf-template-empty.is-error {
-    color: #b42318;
-}
-
 .wf-global-parameters,
 .wf-run-log-list {
     min-height: 0;
@@ -952,6 +881,257 @@ body.workflow-studio-open {
     background: #f6f8fb;
     color: #5b6779;
     font-size: 11px;
+}
+
+.wf-llm-model-section {
+    display: grid;
+    gap: 12px;
+    margin-top: 8px;
+    padding: 18px 0 20px;
+    border-top: 1px solid #e8ecf1;
+    border-bottom: 1px solid #e8ecf1;
+}
+
+.wf-llm-section-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding-left: 20px;
+    color: #3f4c60;
+    font-size: 11px;
+}
+
+.wf-inspector-body .wf-llm-model-field,
+.wf-inspector-body .wf-llm-parameters-field {
+    margin: 0;
+    padding: 0 20px;
+}
+
+.wf-inspector-body .wf-llm-parameters-field {
+    align-items: start;
+}
+
+.wf-llm-parameters-field textarea {
+    min-height: 138px;
+    resize: vertical;
+    font-family: Consolas, "SFMono-Regular", monospace;
+    line-height: 1.55;
+}
+
+.wf-model-selector {
+    position: relative;
+    min-width: 0;
+}
+
+.wf-model-select-trigger {
+    display: grid;
+    width: 100%;
+    min-height: 36px;
+    grid-template-columns: 20px minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 9px;
+    border: 1px solid #d6dde7;
+    border-radius: 5px;
+    background: #fff;
+    color: #354257;
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.wf-model-select-trigger > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wf-model-select-trigger > svg:first-child {
+    color: #7048c6;
+}
+
+.wf-model-select-trigger > svg:last-child,
+.wf-model-provider-heading > svg {
+    transition: transform 0.12s;
+}
+
+.wf-model-select-trigger > svg.is-open,
+.wf-model-provider-heading > svg.is-open {
+    transform: rotate(90deg);
+}
+
+.wf-model-selector.is-invalid .wf-model-select-trigger {
+    border-color: #e56b81;
+    background: #fff8fa;
+}
+
+.wf-model-invalid,
+.wf-model-parameters-error {
+    color: #c72e4e;
+    font-size: 10px;
+}
+
+.wf-model-invalid {
+    display: block;
+    margin-top: 5px;
+}
+
+.wf-model-parameters-error {
+    margin: -5px 20px 0 94px;
+}
+
+.wf-model-picker {
+    position: absolute;
+    z-index: 60;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 100%;
+    min-width: 360px;
+    overflow: hidden;
+    border: 1px solid #cfd7e3;
+    border-radius: 7px;
+    background: #fff;
+    box-shadow: 0 16px 38px rgba(15, 23, 42, 0.18);
+}
+
+.wf-model-picker-search {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 30px;
+    align-items: center;
+    gap: 5px;
+    padding: 8px;
+    border-bottom: 1px solid #e8ecf1;
+    color: #7a8798;
+}
+
+.wf-inspector-body .wf-model-picker-search input {
+    min-height: 31px;
+    padding: 6px 7px;
+    border: 0;
+    box-shadow: none;
+}
+
+.wf-model-picker-search button {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #667488;
+    cursor: pointer;
+}
+
+.wf-model-picker-search button:hover {
+    background: #eef2f7;
+    color: var(--wf-blue);
+}
+
+.wf-model-picker-groups {
+    max-height: 310px;
+    overflow-y: auto;
+    padding: 5px;
+}
+
+.wf-model-provider-group + .wf-model-provider-group {
+    margin-top: 3px;
+}
+
+.wf-model-provider-heading,
+.wf-model-option {
+    display: grid;
+    width: 100%;
+    align-items: center;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #354257;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.wf-model-provider-heading {
+    min-height: 34px;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    gap: 6px;
+    padding: 5px 7px;
+}
+
+.wf-model-provider-heading:hover,
+.wf-model-option:hover {
+    background: #f1f5fa;
+}
+
+.wf-model-provider-heading strong {
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wf-model-provider-heading span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #607084;
+    font-size: 9px;
+}
+
+.wf-model-provider-heading span i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #22a35a;
+}
+
+.wf-model-option {
+    min-height: 34px;
+    grid-template-columns: 20px minmax(0, 1fr) 20px;
+    gap: 7px;
+    padding: 5px 8px 5px 31px;
+    color: #58667a;
+}
+
+.wf-model-option > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wf-model-option > svg:first-child {
+    color: #8995a5;
+}
+
+.wf-model-option.is-selected {
+    background: #edf2ff;
+    color: #244eae;
+    font-weight: 650;
+}
+
+.wf-model-picker-empty {
+    display: flex;
+    min-height: 80px;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    color: #8591a1;
+    font-size: 10px;
+}
+
+.wf-model-picker-empty.is-error {
+    color: #c72e4e;
+}
+
+.wf-model-picker-empty .is-spinning {
+    animation: wf-execution-spin 0.8s linear infinite;
+}
+
+.wf-inspector-actions button:disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .wf-http-api-section {

@@ -3,69 +3,44 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import pytest
-
-from web.tool_execution import execute_tool_template
-from web.tool_runtime import interrupt_tool_run, is_tool_run_active
-from web.tool_templates import (
-    AgentDefinition,
-    HttpConfig,
-    HttpDefinition,
-    LlmDefinition,
-    ScriptDefinition,
-    TemplateManifest,
-    ToolTemplate,
+from web.tool_runtime import (
+    interrupt_tool_run,
+    is_tool_run_active,
+    stream_tool_worker,
 )
 
 
-def _manifest(template_id: str, template_type: str) -> TemplateManifest:
-    return TemplateManifest(
-        id=template_id,
-        type=template_type,
-        name=f"{template_type} Template",
-        created_at="2026-07-20T00:00:00Z",
-        updated_at="2026-07-20T00:00:00Z",
-    )
+def _python_payload(code: str, config=None, inputs=None) -> dict:
+    return {
+        "mode": "PYTHON",
+        "code": code,
+        "inputs": inputs or {},
+        "config": config or {},
+    }
 
 
-def _python_template(template_type: str, code: str, config=None) -> ToolTemplate:
-    definition_class = {
-        "AGENT": AgentDefinition,
-        "LLM": LlmDefinition,
-        "SCRIPT": ScriptDefinition,
-    }[template_type]
-    return ToolTemplate(
-        manifest=_manifest(f"{template_type.lower()}-template", template_type),
-        definition=definition_class(type=template_type, config=config or {}),
-        main_py=code,
-    )
-
-
-@pytest.mark.parametrize("template_type", ["AGENT", "LLM", "SCRIPT"])
-def test_python_templates_share_inputs_config_response_protocol(template_type):
+def test_python_worker_shares_inputs_config_response_protocol():
     logs = []
-    template = _python_template(
-        template_type,
+    payload = _python_payload(
         'print("working", end="", flush=True)\nresponse = {"value": inputs["value"] + config["suffix"]}',
-        {"suffix": "!"},
+        config={"suffix": "!"},
+        inputs={"value": "Workflow"},
     )
 
-    result = execute_tool_template(
-        template,
-        {"value": template_type},
-        logs.append,
-        f"run-{template_type.lower()}",
-    )
+    result = stream_tool_worker(payload, logs.append, "run-python")
 
-    assert result == {"ok": True, "response": {"value": f"{template_type}!"}}
+    assert result == {"ok": True, "response": {"value": "Workflow!"}}
     assert "".join(logs) == "working"
 
 
-def test_python_template_rejects_non_json_response_and_reports_traceback():
+def test_python_worker_rejects_non_json_response_and_reports_traceback():
     logs = []
-    template = _python_template("SCRIPT", "response = float('nan')")
 
-    result = execute_tool_template(template, {}, logs.append, "run-invalid-json")
+    result = stream_tool_worker(
+        _python_payload("response = float('nan')"),
+        logs.append,
+        "run-invalid-json",
+    )
 
     assert result["ok"] is False
     assert "NaN" in result["error"]
@@ -73,13 +48,11 @@ def test_python_template_rejects_non_json_response_and_reports_traceback():
     assert "Traceback" in "".join(logs)
 
 
-def test_python_template_timeout_terminates_worker():
-    template = _python_template("SCRIPT", "import time\ntime.sleep(10)\nresponse = {}")
+def test_python_worker_timeout_terminates_process():
     logs = []
 
-    result = execute_tool_template(
-        template,
-        {},
+    result = stream_tool_worker(
+        _python_payload("import time\ntime.sleep(10)\nresponse = {}"),
         logs.append,
         "run-timeout",
         timeout_seconds=0.2,
@@ -90,14 +63,16 @@ def test_python_template_timeout_terminates_worker():
     assert not is_tool_run_active("run-timeout")
 
 
-def test_python_template_can_be_interrupted():
-    template = _python_template("AGENT", "import time\ntime.sleep(10)\nresponse = {}")
+def test_python_worker_can_be_interrupted():
     holder = {}
-
     thread = threading.Thread(
         target=lambda: holder.setdefault(
             "result",
-            execute_tool_template(template, {}, lambda _text: None, "run-interrupt"),
+            stream_tool_worker(
+                _python_payload("import time\ntime.sleep(10)\nresponse = {}"),
+                lambda _text: None,
+                "run-interrupt",
+            ),
         )
     )
     thread.start()
@@ -113,7 +88,7 @@ def test_python_template_can_be_interrupted():
     assert not is_tool_run_active("run-interrupt")
 
 
-def test_http_config_template_executes_real_request():
+def test_http_worker_executes_real_request():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             length = int(self.headers.get("content-length", "0"))
@@ -122,7 +97,7 @@ def test_http_config_template_executes_real_request():
                 {
                     "path": self.path,
                     "body": body,
-                    "header": self.headers.get("x-template"),
+                    "header": self.headers.get("x-workflow"),
                 }
             ).encode()
             self.send_response(200)
@@ -138,23 +113,22 @@ def test_http_config_template_executes_real_request():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        template = ToolTemplate(
-            manifest=_manifest("http-template", "HTTP"),
-            definition=HttpDefinition(
-                type="HTTP",
-                execution_mode="CONFIG",
-                http=HttpConfig(
-                    method="POST",
-                    url=f"http://127.0.0.1:{server.server_port}/execute?mode=test",
-                    headers={"x-template": "yes"},
-                    body_type="RAW",
-                    body={"question": "hello"},
-                ),
-            ),
-        )
-
-        result = execute_tool_template(
-            template, {}, lambda _text: None, "run-http-config"
+        result = stream_tool_worker(
+            {
+                "mode": "HTTP_CONFIG",
+                "inputs": {},
+                "config": {},
+                "http": {
+                    "method": "POST",
+                    "url": f"http://127.0.0.1:{server.server_port}/execute?mode=test",
+                    "headers": {"x-workflow": "yes"},
+                    "params": {},
+                    "body_type": "RAW",
+                    "body": {"question": "hello"},
+                },
+            },
+            lambda _text: None,
+            "run-http-config",
         )
     finally:
         server.shutdown()

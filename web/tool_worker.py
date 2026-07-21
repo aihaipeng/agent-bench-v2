@@ -1,4 +1,4 @@
-"""Subprocess entry point for Python and HTTP CONFIG tool execution."""
+"""Subprocess entry point for Python and HTTP Workflow node execution."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def _execute_python(payload: dict[str, Any]) -> Any:
         "config": payload["config"],
         "response": None,
     }
-    exec(compile(code, "<tool-template-main.py>", "exec"), namespace, namespace)
+    exec(compile(code, "<workflow-node-main.py>", "exec"), namespace, namespace)
     return namespace.get("response")
 
 

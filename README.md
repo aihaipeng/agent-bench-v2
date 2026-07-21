@@ -79,12 +79,11 @@ uv run pytest tests/test_agent_live_integration.py -m live -q
 
 - `config.yaml`：当前选择的测试集和 Sheet
 - `inputs/`：Excel 测试集及本地元数据
-- `tool_registry/`：工具代码、参数和可能存在的明文 API Key
 - `run_storage/`：SQLite、请求响应、日志和运行 Artifact
 - `outputs/`、`logs/`：导出结果和本地日志
 - `.env*`、证书私钥、虚拟环境、依赖目录和测试缓存
 
-公开仓库只保留 [config.example.yaml](config.example.yaml)、`inputs/.gitkeep` 和 `tool_registry/.gitkeep` 作为安全模板或空目录占位。不要强制添加被忽略的运行数据，也不要发布工具导出 ZIP。
+公开仓库只保留 [config.example.yaml](config.example.yaml) 和 `inputs/.gitkeep` 作为安全模板或空目录占位。不要强制添加被忽略的运行数据。
 
 ## 项目结构
 
@@ -95,7 +94,6 @@ execution/                 # Target、Workflow、Run、调度、执行和 Artifa
 storage/                   # Excel 测试集读取
 tests/                     # 单元、集成和真实模型测试
 inputs/                    # 本机测试集，内容不提交
-tool_registry/             # 本机工具，内容不提交
 run_storage/               # 本机运行数据库与 Artifact，不提交
 ```
 

@@ -1,6 +1,6 @@
-# Workflow Studio 工具模板化与执行协议计划（T13.2）
+# Workflow Studio 节点内聚与执行协议计划（T13.2）
 
-> 状态：T13.1 前端高保真原型和回归已完成；T13.2 不可兼容重构进行中。旧工具数据和旧 Workflow/Run 链路已删除，四类大写工具模板模型、目录仓储、CRUD/ZIP API、工具模板前端、独立执行、画布深拷贝和发布模板已完成；新版 Workflow 持久化协议尚待确认和实现。
+> 状态：T13.1 前端高保真原型和回归已完成；T13.2 Step 11 已完成验收，待本次 Git 提交与推送。按最新业务决策，工具管理/工具模板体系及所有画布耦合已彻底删除，工具节点完全在 Workflow 中定义；LLM 节点已接入模型管理引用、任意 JSON 高级参数和框架无关的 OpenAI-compatible 网关内核。新版 Workflow 持久化与 DAG 真实执行 API 仍尚待单独确认和实现。
 >
 > 更新时间：2026-07-20
 >
@@ -896,6 +896,106 @@ T13.2.1-T13.2.6 已完成
 - 最终价值验证：用户可以从一级导航集中管理供应商连接，通过 API Key + BASE_URL 自动发现模型或手工添加，保存多个模型并在重启后继续编辑；列表不暴露密钥，编辑页按明确选择完整回显。
 - 已知风险：API Key 当前按用户选择在本机 SQLite 明文保存并在编辑页完整回显；任何能访问该本机 Web 页或数据库的用户都可读取。凭据加密、绑定和脱敏仍属于第 22.1 节待优化项。
 - 结论：Step 10 全部验收通过，可以提交并推送当前分支。
+
+### Step 11：Workflow 工具内聚与 LLM 模型参数（completed，2026-07-21）
+
+#### 最新业务方向（Why / Who & Where）
+
+- 用户明确提出删除工具管理页面与耦合逻辑，工具节点只在 Workflow 中创建、编辑和保存；此前“工具模板库作为起点、画布发布回模板”的方向被本节最新决策取代。
+- Workflow / Agent 作者从模型管理维护供应商连接与模型清单，在 LLM 节点中引用已有模型，不重复填写 API Key 或 BASE_URL。
+- LLM 节点的模型选择 UI 参考用户提供的 Dify 截图：顶部搜索、供应商分组折叠、供应商连接状态、模型单选和当前项勾选。
+- LLM 节点需要允许用户自行添加高级参数；Header/Body Override 仍属于模型连接层后续能力，不与本批节点参数混为一谈。
+
+#### 行业调研：高级参数与默认值
+
+- Dify 使用供应商/具体模型下发的 `parameter_rules` 动态生成控件，可选参数通过开关决定是否写入；SDK 通用模板为 Temperature `0`、Top P `1`、Presence/Frequency Penalty `0`、Max Tokens `64`，但具体模型可覆盖，例如 `gpt-4o-mini` 把 Max Tokens 改为 `512`，`gpt-5` 则去掉常规采样参数并增加 Reasoning Effort `medium`、Verbosity `medium`、Streaming `true`、Service Tier `auto`。
+- n8n 的 OpenAI Chat Model 使用固定 Options 集合：Temperature `0.7`、Top P `1`、Presence/Frequency Penalty `0`、Max Tokens `-1`（不限制）、Timeout `60000ms`、Max Retries `2`、Response Format `text`。
+- Langflow OpenAI 组件默认 Temperature `0.1`、Seed `1`、Max Retries `5`、Timeout `700s`，Max Tokens 未设置时传 `None`；同时提供任意 `model_kwargs` 字典作为供应商扩展逃生口。统一 Language Model 组件只保留 Temperature `0.1`、Stream `false` 和可选 Max Tokens。
+- Flowise OpenAI Chat 默认 Temperature `0.9`、Streaming `true`；Max Tokens、Top P、Presence/Frequency Penalty、Timeout 和 Stop Sequence 都是可选且不设置默认值。
+- 结论：不存在可靠的跨供应商默认参数。Agent Bench 若强行写入平台默认值，会覆盖供应商或具体模型默认行为；当前最稳妥策略是节点默认不发送高级参数，用户显式添加后才持久化和发送。
+
+#### 调研来源
+
+- Dify SDK 参数模板：<https://github.com/langgenius/dify-plugin-sdks/blob/main/src/dify_plugin/entities/model/schema.py>
+- Dify `gpt-4o-mini` 与 `gpt-5` 模型 Schema：<https://github.com/langgenius/dify-official-plugins/tree/main/models/openai/models/llm>
+- n8n OpenAI Chat Model：<https://github.com/n8n-io/n8n/blob/master/packages/@n8n/nodes-langchain/nodes/llms/LMChatOpenAi/LmChatOpenAi.node.ts>
+- Langflow OpenAI / Language Model：<https://github.com/langflow-ai/langflow/tree/main/src/lfx/src/lfx/components>
+- Flowise ChatOpenAI：<https://github.com/FlowiseAI/Flowise/blob/main/packages/components/nodes/chatmodels/ChatOpenAI/ChatOpenAI.ts>
+
+#### 专有参数透传补充调研
+
+- `model_kwargs` 是 LangChain 构造参数，不是供应商协议。当前 `ChatOpenAI` 会把 `model_kwargs` 展开为 OpenAI SDK 的顶层调用参数；SDK 未声明的千问/DeepSeek 扩展字段可能直接触发 `TypeError`，通常必须通过 `extra_body` 才能进入 HTTP Body。
+- 当前 `ChatAnthropic` 对 `thinking` 和 `output_config` 有显式字段，也会把 `model_kwargs` 合并进请求 payload，但这仍是框架实现细节，不适合作为 Workflow 持久化契约。
+- Open WebUI 使用“默认不设置”的标准参数，并在自定义模型管理中提供 `custom_params`；Dify 使用具体模型 Schema 白名单；n8n/Flowise 使用固定 Options；Langflow 使用 `model_kwargs`/`model_kwargs` 字典作为逃生口。它们共同说明 UI 数据应与具体 SDK 解耦。
+- Agent Bench 节点字段统一命名为 `modelParameters`：保存原始 JSON 对象。OpenAI-compatible 直连时合并到请求 Body；使用 OpenAI SDK 的用户代码可将其传给 `extra_body`；Anthropic 已知字段可直接展开，未知网关字段可走 SDK 的 `extra_body`。不得把持久化字段命名为 `model_kwargs`。
+- 千问 `enable_thinking / thinking_budget`、DeepSeek `thinking / reasoning_effort`、Anthropic `thinking / output_config` 都可以由该 JSON 数据结构表达；最终能否生效仍由所选供应商、模型和协议端点决定，平台不伪造兼容保证。
+
+#### 已确认决策（1A / 2B / 3A）
+
+- 彻底删除工具模板仓储、CRUD/ZIP/独立运行 API、左侧工具模板页面、画布模板面板、深拷贝和发布入口；不保留隐藏后台兼容。通用 Worker、进程中断和运行流内核保留，供后续 Workflow 节点执行复用。
+- LLM 高级参数只提供一个任意 JSON 对象编辑器，不提供 Temperature 等固定快捷控件；默认值为 `{}`，平台不主动向供应商发送任何高级参数。
+- Token 消耗默认无平台上限：基础请求不发送 `max_tokens` 或 `max_completion_tokens`，由供应商和模型自身上限处理；用户需要限制时可在节点 `modelParameters` 中显式添加。
+- LLM 节点只保存 `provider_id + model_name` 和节点自己的高级参数，不复制 API Key、BASE_URL 或完整供应商记录。供应商或模型被删除后，节点显示“模型已失效”并要求重新选择。
+- 模型选择器采用用户截图结构：顶部搜索、供应商分组折叠、绿色连接状态、模型单选和当前模型勾选。
+- 最新确认采用模型网关式 Body 合并：基础请求、模型级默认参数和节点 `modelParameters` 递归合并，越靠近节点的值优先；数组和非对象值整体替换。
+- 用户选择 `1B / 2A`：节点参数可以覆盖包括 `model`、`messages`、`stream` 在内的全部基础请求字段；嵌套对象递归合并，不设置保留字段白名单。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 输入 | 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|---|
+| Step 11.1 | 删除工具模板后端和页面 | 1A；现有模板仓储/API/UI | 模板文件、路由、导航、ZIP/运行测试全部删除；通用 Worker 保留 | `/api/tool-templates` 与静态资产 404；生产源码零引用；Worker 专项通过 | 无 |
+| Step 11.2 | 删除画布模板耦合 | Step 11.1；当前 React Flow Studio | 顶部模板面板、加载/深拷贝、发布菜单与 API 调用删除；四类空白节点保留 | 前端源码断言、构建、Studio 基线回归 | Step 11.1 |
+| Step 11.3 | LLM 模型引用与高级 JSON | 模型管理列表 API；2B/3A；用户 UI 参考 | 分组模型选择器、失效态、`providerId/modelName/modelParameters` 节点状态 | 模型列表加载、搜索/折叠/选择、JSON 校验、删除后失效测试 | Step 11.2 |
+| Step 11.4 | 集成验收与发布 | 完成的清理和 LLM 编辑器 | E2E、全量回归、计划收口和 GitHub 提交 | 1440x900 浏览器 E2E、构建、静态检查、全量 pytest、密钥扫描 | Step 11.1-11.3 |
+
+#### Step 11.1：删除工具模板后端和一级页面（completed）
+
+- 删除范围：删除模板 Pydantic/目录仓储、ZIP 归档、CRUD/刷新/导入导出/发布/独立运行 API、模板运行适配器、左侧页面与脚本、迁移脚本、`tool_registry/` 占位和全部模板专项测试；不保留隐藏 API 兼容。
+- 保留范围：保留 `tool_runtime.py / tool_worker.py / run_stream.py` 作为 Workflow 节点通用子进程、HTTP、进程中断和 SSE 流内核；模块文案已去除“模板”语义。
+- 内核测试重写：`test_tool_execution.py` 不再构造 ToolTemplate，直接发送通用 Worker payload；继续覆盖 Python `inputs/config/response`、无换行 flush、NaN/Infinity、超时、中断和真实 HTTP 请求。
+- 页面与文档：删除左侧“工具模板”、`tool-templates.js` 静态路由和专属 CSS；README 与 `.gitignore` 删除 `tool_registry` 说明和规则。
+- 专项验证：`uv run pytest tests/test_tool_execution.py tests/test_run_stream.py tests/test_tool_removal.py tests/test_web_app.py -q` 结果 `13 passed, 1 warning`；Python 编译和 `git diff --check` 通过。
+- 零引用验证：除下一步待处理的 React Flow 画布源码/CSS 和构建产物外，`web/ execution/ README.md / .gitignore` 对 `tool-template / ToolTemplate / tool_registry / viewToolTemplates` 零命中。
+- 依赖结论：Step 11.1 已完成，可以开始 Step 11.2 画布模板耦合删除。
+
+#### Step 11.2：删除画布模板耦合（completed）
+
+- 删除范围：React Flow Studio 顶部“工具模板”入口、模板加载状态和 `/api/tool-templates` 请求、模板深拷贝、发布方法、右键“发布为工具模板”操作及全部专属样式均已删除。
+- 保留范围：`HTTP / AGENT / LLM / SCRIPT` 四类空白节点的新增、编辑、复制、连线、状态演示和历史操作继续保留。
+- 构建验证：`npm run build` 成功，重新生成 `workflow-canvas.js / workflow-canvas.css`，`node --check web/static/assets/workflow-canvas.js` 通过。
+- 专项验证：`uv run pytest tests/test_execution_frontend.py tests/test_tool_removal.py -q` 结果 `10 passed, 1 warning`；`git diff --check` 通过。
+- 零引用验证：`web/ execution/ README.md / .gitignore` 以及生成资源对工具模板标识和显示文案零命中。
+- 依赖结论：Step 11.2 已完成，可以开始 Step 11.3 LLM 模型引用、任意 JSON 参数和网关式递归合并。
+
+#### Step 11.3：LLM 模型引用、高级 JSON 与网关合并（completed）
+
+- 网关内核：新增与 LangChain 解耦的 OpenAI-compatible 请求组装与 HTTP 传输；合并顺序为“基础请求 → 模型默认参数 → 节点 `modelParameters`”，后层优先，对象递归合并，数组和标量整体替换。
+- Token 默认：基础请求不包含 `max_tokens` 或 `max_completion_tokens`，Agent Bench 默认不限制 token 消耗；节点显式填写时仍按普通高级参数合并并透传。
+- 覆盖边界：按已确认的 `1B / 2A`，节点参数可覆盖 `model`、`messages`、`stream` 及任意其他 Body 字段，平台不维护保留字段白名单，也不翻译供应商专有参数。
+- 节点状态：LLM 节点只保存 `providerId / modelName / modelParameters`；API Key、BASE_URL 和供应商完整记录仍由模型管理持有，不进入 Workflow 节点状态。高级参数默认为空对象 `{}`。
+- 选择器 UI：接入不含密钥的 `/api/model-providers` 列表，实现供应商分组、搜索、折叠、连接状态、当前模型勾选和刷新；供应商或模型删除后显示“模型已失效”并禁用节点保存/运行。
+- JSON 编辑：使用任意 JSON 对象编辑器；非法 JSON 或顶层非对象时显示明确错误并禁用保存/运行，修复为合法对象后即恢复。
+- 自动化验证：`uv run pytest tests/test_model_gateway.py tests/test_execution_frontend.py tests/test_tool_removal.py -q` 结果 `25 passed, 1 warning`；`npm run build`、生成 bundle 的 `node --check` 和 `git diff --check` 全部通过。
+- 真实浏览器 E2E：在 `1440x900` 下验证 DeepSeek 选择、搜索过滤、当前项选中、供应商折叠、非法/合法 JSON 切换和无裁切重叠；通过创建临时供应商、选择、删除并刷新，实测“模型已失效”与禁用状态，临时数据已清理。
+- 范围约束：新网关内核已可独立真实调用，但新 Workflow Studio 仍是前端本地状态和演示运行，本步没有实现 Workflow 持久化或 DAG 真实执行 API，不得宣称画布端到端模型执行已完成。
+- 真实模型验证：新增受 `live` marker 控制的网关集成测试，固定覆盖千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro`；未注入环境变量时安全跳过，不影响公开回归。为验证稳定性，每个模型顺序执行两轮真实请求。
+- 真实业务场景：测试使用企业客服 Agent 合规评测，输入用户退款问题、三条明确策略以及一段“未授权即宣称退款完成，并索取身份证、银行卡和验证码”的高风险回复；要求模型输出包含 `passed / score / summary / issues / recommendation` 的严格 JSON。
+- 真实调用结果：使用用户提供的两家凭据仅在 pytest 进程内执行 `uv run pytest tests/test_model_gateway.py tests/test_model_gateway_live.py -m live -q`，结果 `4 passed, 4 deselected in 25.22s`。千问和 DeepSeek 各两轮均返回可解析且字段完整的 JSON，均稳定判定该 Agent 回复不通过并输出具体问题和改进建议。
+- 覆盖价值：live 请求故意在基础层放入错误模型、错误消息和 `stream: true`，再由节点参数覆盖为真实模型、完整的 system/user 业务消息和 `stream: false`；模型默认层的 `response_format: {"type": "json_object"}` 被保留，千问同时直透 `enable_thinking: false`。四次请求均明确断言不存在 `max_tokens / max_completion_tokens`。
+- 密钥边界：API Key 未写入测试、文档、代码、命令输出或 Git 跟踪文件；DeepSeek 密钥从本机模型仓储读入子进程，千问密钥只注入单次 pytest 进程。
+- 依赖结论：Step 11.3 及两家真实模型验证已完成，可以进入 Step 11.4 全量回归与发布。
+
+#### Step 11.4：集成验收与发布（completed）
+
+- 业务验收：工具管理一级页面、仓储、CRUD/ZIP/独立运行 API、画布模板面板、深拷贝和发布入口均已删除；`HTTP / AGENT / LLM / SCRIPT` 节点继续由 Workflow Studio 直接创建和编辑。
+- LLM 交互验收：`1440x900` 真实浏览器覆盖模型列表加载、搜索、供应商折叠、当前项勾选、DeepSeek 选择、非法/合法高级 JSON、删除供应商后的失效态和禁用操作；截图无裁切、重叠或文本越界。
+- 真实模型回归：千问 `qwen3.7-max` 和 DeepSeek `deepseek-v4-pro` 各连续两轮企业 Agent 合规评测，结果 `4 passed, 4 deselected in 25.22s`；全程不发送 token 上限，两家均稳定返回字段完整且业务判定正确的结构化 JSON。
+- 全量回归：`uv run pytest -q` 结果 `100 passed, 4 skipped, 1 warning in 11.47s`；4 个跳过项为默认未注入两家凭据时的两轮 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+- 构建与静态检查：`npm run build` 成功生成 Workflow JS/CSS bundle；`execution/` 和 `web/` Python `compileall`、`app.js / model-providers.js / execution.js / workflow-canvas.js` 的 `node --check`、`git diff --check` 全部通过。
+- 清理与安全：生产源码对 `tool-template / ToolTemplate / tool_registry / viewToolTemplates` 零引用；Git 跟踪及待提交文件中的真实 `sk-` 凭据形态扫描为 0；失效引用 E2E 临时供应商已删除。
+- 已知边界：模型网关的请求组装、递归合并和真实 HTTP 传输已验证；画布仍为前端本地草稿与演示运行，尚未把该网关接入 Workflow 持久化和 DAG 执行后端，因此不宣称 Workflow 端到端真实 LLM 执行已完成。
+- 价值结论：Workflow 作者可在 LLM 节点引用已管理模型，使用任意 JSON 直透国内外供应商参数，节点优先覆盖模型默认值，并在默认情况下不受 Agent Bench token 上限限制。
 
 ## 22. 待优化项目
 

@@ -39,8 +39,9 @@ import {
     Play,
     Plus,
     Redo2,
+    RefreshCw,
     Save,
-    ServerCog,
+    Search,
     Settings2,
     SlidersHorizontal,
     Sparkles,
@@ -86,58 +87,21 @@ function cloneValue(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-function objectRows(value) {
-    return Object.entries(value || {}).map(([key, item]) => ({id: rowId(), key, value: String(item)}));
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function httpConfigFromTemplate(definition) {
-    const config = definition?.http || {};
-    return {
-        ...defaultHttpConfig(),
-        method: config.method || 'GET',
-        url: config.url || '',
-        headers: objectRows(config.headers),
-        params: objectRows(config.params),
-        bodyType: ({NONE: 'none', FORM_DATA: 'form-data', FORM_URLENCODED: 'x-www-form-urlencoded', RAW: 'raw', BINARY: 'binary'})[config.body_type] || 'none',
-        bodyText: config.body == null ? '' : (typeof config.body === 'string' ? config.body : JSON.stringify(config.body, null, 2)),
-    };
+function modelProviderName(provider) {
+    return provider?.name || '未命名供应商';
 }
 
-function objectFromRows(rows) {
-    return Object.fromEntries(
-        (rows || [])
-            .filter((row) => String(row.key || '').trim())
-            .map((row) => [String(row.key).trim(), String(row.value ?? '')]),
-    );
-}
-
-function templateDefinitionFromNode(node) {
-    const existing = node.data.templateDefinition
-        ? cloneValue(node.data.templateDefinition)
-        : {schema_version: 1, type: node.data.nodeType, inputs: [], outputs: [], config: {}};
-    const definition = {
-        ...existing,
-        type: node.data.nodeType,
-        inputs: existing.inputs || [],
-        outputs: existing.outputs || [],
-        config: existing.config || {},
-    };
-    if (node.data.nodeType !== 'HTTP') return definition;
-    const httpConfig = {...defaultHttpConfig(), ...(node.data.httpConfig || {})};
-    return {
-        ...definition,
-        execution_mode: existing.execution_mode || 'CONFIG',
-        http: {
-            method: httpConfig.method,
-            url: httpConfig.url,
-            headers: objectFromRows(httpConfig.headers),
-            params: objectFromRows(httpConfig.params),
-            body_type: ({none: 'NONE', 'form-data': 'FORM_DATA', 'x-www-form-urlencoded': 'FORM_URLENCODED', raw: 'RAW', binary: 'BINARY'})[httpConfig.bodyType] || 'NONE',
-            body: httpConfig.bodyType === 'form-data' || httpConfig.bodyType === 'x-www-form-urlencoded'
-                ? objectFromRows(httpConfig.bodyFields)
-                : (httpConfig.bodyText || null),
-        },
-    };
+function modelReferenceStatus(providers, providerId, modelName) {
+    if (!providerId && !modelName) return {state: 'empty', provider: null};
+    const provider = providers.find((item) => item.id === providerId) || null;
+    if (!provider || !(provider.models || []).includes(modelName)) {
+        return {state: 'invalid', provider};
+    }
+    return {state: 'valid', provider};
 }
 
 function parameterDataText(value, pretty = false) {
@@ -286,6 +250,7 @@ function makeNode(type, position, overrides = {}) {
             outputVariables: [emptyMappingRow()],
             parameterRecords: [],
             ...(type === 'HTTP' ? {httpConfig: defaultHttpConfig()} : {}),
+            ...(type === 'LLM' ? {providerId: '', modelName: '', modelParameters: {}} : {}),
             ...(meta.executable ? {mainPy: DEFAULT_MAIN_PY} : {}),
             ...overrides,
         },
@@ -413,7 +378,7 @@ function InsertableEdge({id, sourceX, sourceY, targetX, targetY, sourcePosition,
 const nodeTypes = {workflowNode: WorkflowNode};
 const edgeTypes = {insertable: InsertableEdge};
 
-function ContextMenu({menu, canPaste, canPublish, onAction, onAdd}) {
+function ContextMenu({menu, canPaste, onAction, onAdd}) {
     const [submenuOpen, setSubmenuOpen] = useState(false);
     useEffect(() => setSubmenuOpen(false), [menu?.kind, menu?.x, menu?.y]);
     if (!menu) return null;
@@ -422,7 +387,6 @@ function ContextMenu({menu, canPaste, canPublish, onAction, onAdd}) {
             <div className="wf-context-menu" style={{left: menu.x, top: menu.y}} role="menu" data-testid="node-context-menu">
                 <button type="button" onClick={() => onAction('run-node')}><Play size={15} /><span>运行此步骤</span></button>
                 <button type="button" onClick={() => onAction('copy-node')}><Copy size={15} /><span>拷贝</span></button>
-                {canPublish && <button type="button" onClick={() => onAction('publish-node')}><Upload size={15} /><span>发布为工具模板</span></button>}
                 <div className="wf-menu-separator" />
                 <button type="button" className="is-danger" onClick={() => onAction('delete-node')}><Trash2 size={15} /><span>删除</span></button>
             </div>
@@ -440,7 +404,120 @@ function ContextMenu({menu, canPaste, canPublish, onAction, onAdd}) {
     );
 }
 
-function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onClose}) {
+function ModelSelector({
+    providers,
+    loadState,
+    loadError,
+    providerId,
+    modelName,
+    onSelect,
+    onRefresh,
+}) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState('');
+    const [collapsed, setCollapsed] = useState(() => new Set());
+    const reference = modelReferenceStatus(providers, providerId, modelName);
+    const normalizedQuery = query.trim().toLowerCase();
+    const groups = providers.map((provider) => {
+        const providerMatches = [provider.name, provider.base_url, provider.protocol]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase()
+            .includes(normalizedQuery);
+        const models = (provider.models || []).filter((model) => (
+            !normalizedQuery || providerMatches || model.toLowerCase().includes(normalizedQuery)
+        ));
+        return {...provider, filteredModels: models};
+    }).filter((provider) => provider.filteredModels.length);
+    const toggleProvider = (id) => setCollapsed((current) => {
+        const next = new Set(current);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+    });
+    const selectionLabel = reference.state === 'valid'
+        ? `${modelProviderName(reference.provider)} / ${modelName}`
+        : reference.state === 'invalid'
+            ? `${modelName || '未知模型'}（模型已失效）`
+            : '选择模型';
+
+    return (
+        <div className={`wf-model-selector ${reference.state === 'invalid' ? 'is-invalid' : ''}`}>
+            <button
+                type="button"
+                className="wf-model-select-trigger"
+                aria-haspopup="listbox"
+                aria-expanded={open}
+                onClick={() => setOpen((current) => !current)}
+            >
+                <BrainCircuit size={15} />
+                <span>{selectionLabel}</span>
+                <ChevronRight className={open ? 'is-open' : ''} size={15} />
+            </button>
+            {reference.state === 'invalid' && <span className="wf-model-invalid" role="alert">模型已失效</span>}
+            {open && (
+                <div className="wf-model-picker" role="listbox" aria-label="选择已有模型">
+                    <div className="wf-model-picker-search">
+                        <Search size={14} />
+                        <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索供应商或模型" aria-label="搜索供应商或模型" />
+                        <button type="button" onClick={onRefresh} title="刷新模型列表" aria-label="刷新模型列表"><RefreshCw size={14} /></button>
+                    </div>
+                    <div className="wf-model-picker-groups">
+                        {loadState === 'loading' && <div className="wf-model-picker-empty"><LoaderCircle className="is-spinning" size={15} />正在加载</div>}
+                        {loadState === 'error' && <div className="wf-model-picker-empty is-error">{loadError || '模型列表加载失败'}</div>}
+                        {loadState === 'ready' && groups.map((provider) => {
+                            const isCollapsed = collapsed.has(provider.id);
+                            return (
+                                <section className="wf-model-provider-group" key={provider.id}>
+                                    <button type="button" className="wf-model-provider-heading" aria-expanded={!isCollapsed} onClick={() => toggleProvider(provider.id)}>
+                                        <ChevronRight className={isCollapsed ? '' : 'is-open'} size={14} />
+                                        <strong>{modelProviderName(provider)}</strong>
+                                        <span><i />已连接</span>
+                                    </button>
+                                    {!isCollapsed && provider.filteredModels.map((model) => {
+                                        const selected = provider.id === providerId && model === modelName;
+                                        return (
+                                            <button
+                                                type="button"
+                                                role="option"
+                                                aria-selected={selected}
+                                                className={`wf-model-option ${selected ? 'is-selected' : ''}`}
+                                                key={model}
+                                                onClick={() => {
+                                                    onSelect(provider.id, model);
+                                                    setOpen(false);
+                                                    setQuery('');
+                                                }}
+                                            >
+                                                <BrainCircuit size={14} />
+                                                <span>{model}</span>
+                                                {selected && <Check size={15} />}
+                                            </button>
+                                        );
+                                    })}
+                                </section>
+                            );
+                        })}
+                        {loadState === 'ready' && !groups.length && <div className="wf-model-picker-empty">没有匹配的模型</div>}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function Inspector({
+    node,
+    providers,
+    providerLoadState,
+    providerLoadError,
+    onRefreshProviders,
+    initialTab = 'settings',
+    onChange,
+    onRun,
+    onSave,
+    onClose,
+}) {
     const [tab, setTab] = useState(initialTab);
     const [retryOpen, setRetryOpen] = useState(false);
     const [mappingOpen, setMappingOpen] = useState(false);
@@ -451,6 +528,8 @@ function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onCl
     const [headersOpen, setHeadersOpen] = useState(true);
     const [paramsOpen, setParamsOpen] = useState(true);
     const [bodyMessage, setBodyMessage] = useState('');
+    const [modelParametersText, setModelParametersText] = useState('{}');
+    const [modelParametersError, setModelParametersError] = useState('');
     useEffect(() => {
         setCurlPanelOpen(false);
         setCurlText('');
@@ -459,11 +538,22 @@ function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onCl
         setParamsOpen(true);
         setBodyMessage('');
         setSelectedParameterIndex(null);
+        setModelParametersText(JSON.stringify(node?.data.modelParameters || {}, null, 2));
+        setModelParametersError('');
     }, [node?.id]);
     if (!node) return null;
     const meta = NODE_TYPES[node.data.nodeType] || NODE_TYPES.SCRIPT;
     const Icon = meta.icon;
     const isHttp = node.data.nodeType === 'HTTP';
+    const isLlm = node.data.nodeType === 'LLM';
+    const modelReference = modelReferenceStatus(
+        providers,
+        node.data.providerId || '',
+        node.data.modelName || '',
+    );
+    const llmConfigurationValid = !isLlm || (
+        modelReference.state === 'valid' && !modelParametersError
+    );
     const httpConfig = {...defaultHttpConfig(), ...(node.data.httpConfig || {})};
     const width = Math.min(Math.round(760 * 1.4), window.innerWidth - 56);
     const height = Math.min(Math.round(640 * 1.4), window.innerHeight - 58 - 28);
@@ -501,6 +591,17 @@ function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onCl
     const removeHttpRow = (collection, id) => updateHttpConfig({
         [collection]: httpConfig[collection].filter((row) => row.id !== id),
     });
+    const updateModelParameters = (text) => {
+        setModelParametersText(text);
+        try {
+            const parsed = JSON.parse(text);
+            if (!isPlainObject(parsed)) throw new Error('高级参数必须是 JSON 对象');
+            setModelParametersError('');
+            onChange({modelParameters: parsed});
+        } catch (error) {
+            setModelParametersError(error instanceof SyntaxError ? '高级参数不是合法 JSON' : error.message);
+        }
+    };
     const updateOutputVariable = (id, patch) => onChange({
         outputVariables: outputVariables.map((row) => row.id === id ? {...row, ...patch} : row),
     });
@@ -590,8 +691,8 @@ function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onCl
                     <span className="wf-inspector-icon" style={{'--node-accent': meta.color}}><Icon size={18} /></span>
                     <div className="wf-inspector-title"><strong>{node.data.label}</strong><small>{meta.caption}</small></div>
                     <div className="wf-inspector-actions">
-                        <button type="button" onClick={onRun} title="运行" aria-label="运行当前节点"><Play size={15} /></button>
-                        <button type="button" className={node.data.savedAt && !node.data.isDirty ? 'is-saved' : ''} onClick={onSave} title={node.data.savedAt && !node.data.isDirty ? `已保存 ${node.data.savedAt}` : '保存'} aria-label="保存当前节点"><Save size={15} /></button>
+                        <button type="button" disabled={!llmConfigurationValid} onClick={onRun} title={llmConfigurationValid ? '运行' : '请先选择有效模型并修正高级参数'} aria-label="运行当前节点"><Play size={15} /></button>
+                        <button type="button" disabled={!llmConfigurationValid} className={node.data.savedAt && !node.data.isDirty ? 'is-saved' : ''} onClick={onSave} title={llmConfigurationValid ? (node.data.savedAt && !node.data.isDirty ? `已保存 ${node.data.savedAt}` : '保存') : '请先选择有效模型并修正高级参数'} aria-label="保存当前节点"><Save size={15} /></button>
                         <button type="button" onClick={onClose} title="关闭" aria-label="关闭"><X size={17} /></button>
                     </div>
                 </header>
@@ -606,6 +707,28 @@ function Inspector({node, initialTab = 'settings', onChange, onRun, onSave, onCl
                         <div className="wf-editor-form-grid">
                             <label><span>名称</span><input value={node.data.label} onChange={(event) => onChange({label: event.target.value})} /></label>
                             <label><span>说明</span><input value={node.data.description || ''} onChange={(event) => onChange({description: event.target.value})} placeholder="添加节点说明" /></label>
+                            {isLlm && (
+                                <section className="wf-llm-model-section wf-editor-full-row">
+                                    <div className="wf-llm-section-title"><BrainCircuit size={15} /><strong>模型配置</strong></div>
+                                    <label className="wf-llm-model-field">
+                                        <span>模型</span>
+                                        <ModelSelector
+                                            providers={providers}
+                                            loadState={providerLoadState}
+                                            loadError={providerLoadError}
+                                            providerId={node.data.providerId || ''}
+                                            modelName={node.data.modelName || ''}
+                                            onRefresh={onRefreshProviders}
+                                            onSelect={(providerId, modelName) => onChange({providerId, modelName})}
+                                        />
+                                    </label>
+                                    <label className="wf-llm-parameters-field">
+                                        <span>高级参数</span>
+                                        <textarea aria-label="模型高级参数 JSON" spellCheck="false" value={modelParametersText} onChange={(event) => updateModelParameters(event.target.value)} />
+                                    </label>
+                                    {modelParametersError && <span className="wf-model-parameters-error" role="alert">{modelParametersError}</span>}
+                                </section>
+                            )}
                             {isHttp && (
                                 <section className="wf-http-api-section wf-editor-full-row">
                                     <div className="wf-http-api-row">
@@ -755,21 +878,49 @@ function WorkflowStudio({options}) {
     const [insertEdgeId, setInsertEdgeId] = useState(null);
     const [clipboard, setClipboard] = useState(null);
     const [headerPanel, setHeaderPanel] = useState(null);
-    const [toolTemplates, setToolTemplates] = useState([]);
-    const [templateLoadState, setTemplateLoadState] = useState('idle');
     const [marquee, setMarquee] = useState(null);
     const [globalVariables, setGlobalVariables] = useState([emptyMappingRow()]);
     const [nodeSaveNotice, setNodeSaveNotice] = useState(null);
     const [workflowName, setWorkflowName] = useState(options.name || '未命名工作流');
     const [saveState, setSaveState] = useState('本地草稿');
+    const [modelProviders, setModelProviders] = useState([]);
+    const [providerLoadState, setProviderLoadState] = useState('loading');
+    const [providerLoadError, setProviderLoadError] = useState('');
     const timers = useRef([]);
     const pasteSequence = useRef(0);
     const marqueeRef = useRef(null);
     const initialLayoutDone = useRef(false);
     const undoStack = useRef([]);
     const redoStack = useRef([]);
+    const providerLoadSequence = useRef(0);
     const [historyTick, setHistoryTick] = useState(0);
     const {screenToFlowPosition, fitView} = useReactFlow();
+
+    const loadModelProviders = useCallback(async () => {
+        const sequence = providerLoadSequence.current + 1;
+        providerLoadSequence.current = sequence;
+        setProviderLoadState('loading');
+        setProviderLoadError('');
+        try {
+            const response = await fetch('/api/model-providers', {
+                headers: {accept: 'application/json'},
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+            if (providerLoadSequence.current !== sequence) return;
+            setModelProviders(Array.isArray(payload.providers) ? payload.providers : []);
+            setProviderLoadState('ready');
+        } catch (error) {
+            if (providerLoadSequence.current !== sequence) return;
+            setModelProviders([]);
+            setProviderLoadState('error');
+            setProviderLoadError(error instanceof Error ? error.message : '模型列表加载失败');
+        }
+    }, []);
+
+    useEffect(() => {
+        loadModelProviders();
+    }, [loadModelProviders]);
 
     const closeMenus = useCallback(() => {
         setContextMenu(null);
@@ -813,47 +964,31 @@ function WorkflowStudio({options}) {
         return next;
     }, [closeMenus, recordHistory, setNodes]);
 
-    const openTemplatePanel = useCallback(async () => {
-        if (headerPanel === 'templates') {
-            setHeaderPanel(null);
-            return;
-        }
-        setHeaderPanel('templates');
-        setTemplateLoadState('loading');
-        try {
-            const response = await fetch('/api/tool-templates');
-            if (!response.ok) throw new Error('工具模板加载失败');
-            const data = await response.json();
-            setToolTemplates(data.templates || []);
-            setTemplateLoadState('ready');
-        } catch (error) {
-            setToolTemplates([]);
-            setTemplateLoadState('error');
-        }
-    }, [headerPanel]);
-
-    const addTemplateNode = useCallback((template) => {
-        const type = template?.manifest?.type;
-        if (!INSERTABLE_TYPES.includes(type)) return;
-        const position = screenToFlowPosition({x: window.innerWidth / 2, y: window.innerHeight / 2});
-        const definition = cloneValue(template.definition);
-        const overrides = {
-            label: template.manifest.name,
-            description: template.manifest.description || '',
-            templateDefinition: definition,
-            mainPy: template.main_py,
-            ...(type === 'HTTP' ? {httpConfig: httpConfigFromTemplate(definition)} : {}),
-        };
-        recordHistory();
-        const next = {...makeNode(type, position, overrides), selected: true};
-        setNodes((current) => current.map((node) => ({...node, selected: false})).concat(next));
-        setHeaderPanel(null);
-    }, [recordHistory, screenToFlowPosition, setNodes]);
-
     const runNode = useCallback((id) => {
         const startedAt = new Date().toLocaleTimeString('zh-CN', {hour12: false});
         const startedAtMs = Date.now();
         const executionId = rowId();
+        const targetNode = nodes.find((node) => node.id === id);
+        if (targetNode?.data.nodeType === 'LLM') {
+            const reference = modelReferenceStatus(
+                modelProviders,
+                targetNode.data.providerId || '',
+                targetNode.data.modelName || '',
+            );
+            if (reference.state !== 'valid') {
+                const message = reference.state === 'empty' ? '未选择模型' : '模型已失效';
+                setNodes((current) => current.map((node) => node.id === id ? {
+                    ...node,
+                    data: {
+                        ...node.data,
+                        status: 'FAILED',
+                        executionDurationMs: 0,
+                        runHistory: (node.data.runHistory || []).concat({id: rowId(), time: startedAt, status: 'FAILED', message}),
+                    },
+                } : node));
+                return;
+            }
+        }
         setNodes((current) => current.map((node) => node.id === id ? {
             ...node,
             data: {
@@ -887,7 +1022,7 @@ function WorkflowStudio({options}) {
             } : node));
         }, 900);
         timers.current.push(elapsedTimer, timer);
-    }, [setNodes]);
+    }, [modelProviders, nodes, setNodes]);
 
     const saveNode = useCallback((id) => {
         const savedAt = new Date().toLocaleTimeString('zh-CN', {hour12: false});
@@ -942,31 +1077,6 @@ function WorkflowStudio({options}) {
     }, [closeMenus, edges, nodes]);
 
     const copyNode = useCallback((id) => copyNodes([id]), [copyNodes]);
-
-    const publishNode = useCallback(async (id) => {
-        const node = nodes.find((item) => item.id === id);
-        if (!node || !INSERTABLE_TYPES.includes(node.data.nodeType)) return;
-        if (!window.confirm(`将“${node.data.label}”发布为独立新模板？config 中的 API Key 会清空，代码中的秘密不会自动修改。`)) return;
-        try {
-            const response = await fetch('/api/tool-templates/publish', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    type: node.data.nodeType,
-                    name: node.data.label,
-                    description: node.data.description || '',
-                    definition: templateDefinitionFromNode(node),
-                    main_py: node.data.mainPy ?? null,
-                }),
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.detail || '发布失败');
-            setToolTemplates((current) => [data.template].concat(current));
-            if (window.showToast) window.showToast('已发布为独立工具模板', 'success');
-        } catch (error) {
-            if (window.showToast) window.showToast(`发布工具模板失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-        }
-    }, [nodes]);
 
     const pasteClipboard = useCallback((origin = null) => {
         if (!clipboard?.nodes?.length) return;
@@ -1173,10 +1283,9 @@ function WorkflowStudio({options}) {
         if (action === 'paste-node') pasteNode();
         if (action === 'run-node' && contextMenu?.nodeId) runNode(contextMenu.nodeId);
         if (action === 'copy-node' && contextMenu?.nodeId) copyNode(contextMenu.nodeId);
-        if (action === 'publish-node' && contextMenu?.nodeId) publishNode(contextMenu.nodeId);
         if (action === 'delete-node' && contextMenu?.nodeId) deleteNode(contextMenu.nodeId);
         if (action !== 'paste-node') setContextMenu(null);
-    }, [contextMenu, copyNode, deleteNode, pasteNode, publishNode, runAll, runNode]);
+    }, [contextMenu, copyNode, deleteNode, pasteNode, runAll, runNode]);
 
     const autoLayout = useCallback(() => {
         recordHistory();
@@ -1222,7 +1331,6 @@ function WorkflowStudio({options}) {
                 </div>
                 <div className="wf-header-actions">
                     <button type="button" className="wf-secondary-button" onClick={runAll}><Play size={15} />运行</button>
-                    <button type="button" className={headerPanel === 'templates' ? 'is-active' : ''} onClick={openTemplatePanel}><ServerCog size={15} />工具模板</button>
                     <button type="button" className={headerPanel === 'variables' ? 'is-active' : ''} onClick={() => setHeaderPanel((current) => current === 'variables' ? null : 'variables')}><SlidersHorizontal size={15} />全局变量</button>
                     <button type="button" className="wf-primary-button" onClick={save}><Save size={15} />保存</button>
                 </div>
@@ -1258,29 +1366,6 @@ function WorkflowStudio({options}) {
                                         )}
                                     </div>
                                 ))}
-                        </div>
-                    </aside>
-                )}
-                {headerPanel === 'templates' && (
-                    <aside className="wf-header-popover wf-template-popover" aria-label="工具模板">
-                        <header>
-                            <strong>工具模板</strong>
-                            <button type="button" onClick={() => setHeaderPanel(null)} title="关闭" aria-label="关闭工具模板"><X size={16} /></button>
-                        </header>
-                        <div className="wf-template-list">
-                            {templateLoadState === 'loading' && <span className="wf-template-empty">正在加载</span>}
-                            {templateLoadState === 'error' && <span className="wf-template-empty is-error">加载失败</span>}
-                            {templateLoadState === 'ready' && !toolTemplates.length && <span className="wf-template-empty">暂无工具模板</span>}
-                            {toolTemplates.map((template) => {
-                                const meta = NODE_TYPES[template.manifest.type] || NODE_TYPES.SCRIPT;
-                                const Icon = meta.icon;
-                                return (
-                                    <button type="button" key={template.manifest.id} onClick={() => addTemplateNode(template)}>
-                                        <span className="wf-template-icon" style={{'--template-accent': meta.color}}><Icon size={16} /></span>
-                                        <span><strong>{template.manifest.name}</strong><small>{template.manifest.type}</small></span>
-                                    </button>
-                                );
-                            })}
                         </div>
                     </aside>
                 )}
@@ -1353,13 +1438,16 @@ function WorkflowStudio({options}) {
                 <ContextMenu
                     menu={contextMenu}
                     canPaste={Boolean(clipboard?.nodes?.length)}
-                    canPublish={Boolean(contextMenu?.nodeId && INSERTABLE_TYPES.includes(nodes.find((node) => node.id === contextMenu.nodeId)?.data.nodeType))}
                     onAction={contextAction}
                     onAdd={(type) => contextMenu?.flowPosition && addNodeAt(type, contextMenu.flowPosition)}
                 />
                 <Inspector
                     key={editorNodeId || 'none'}
                     node={editorNode}
+                    providers={modelProviders}
+                    providerLoadState={providerLoadState}
+                    providerLoadError={providerLoadError}
+                    onRefreshProviders={loadModelProviders}
                     onRun={() => editorNodeId && runNode(editorNodeId)}
                     onSave={() => editorNodeId && saveNode(editorNodeId)}
                     onClose={() => setEditorNodeId(null)}
