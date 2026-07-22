@@ -10,6 +10,13 @@ var modelProviderState = {
     modelConfigs: {},
     modelTests: {},
 };
+var MODEL_DEFAULT_BODY_REFERENCE = JSON.stringify({
+    thinking: {type: 'disabled'},
+    temperature: 0,
+    top_p: 0.8,
+    max_tokens: 1024,
+    response_format: {type: 'json_object'},
+}, null, 2);
 
 function modelProviderName(provider) {
     return provider.name || '未命名供应商';
@@ -17,6 +24,13 @@ function modelProviderName(provider) {
 
 function modelProviderProtocolLabel(protocol) {
     return protocol === 'ANTHROPIC' ? 'Anthropic' : 'OpenAI';
+}
+
+function modelProviderDefaultBodyText(defaultBody) {
+    return defaultBody && !Array.isArray(defaultBody) && typeof defaultBody === 'object'
+        && Object.keys(defaultBody).length
+        ? JSON.stringify(defaultBody, null, 2)
+        : '';
 }
 
 function filteredModelProviders() {
@@ -423,6 +437,7 @@ async function testProviderModel(model, button) {
 
 function openProviderModelConfig(model) {
     var current = modelProviderState.modelConfigs[model] || {};
+    var defaultBodyText = modelProviderDefaultBodyText(current.default_body);
     var overlay = document.createElement('div');
     overlay.id = 'model-provider-config-overlay';
     overlay.className = 'overlay';
@@ -431,15 +446,31 @@ function openProviderModelConfig(model) {
         '<div class="modal-body model-provider-config-body">' +
             '<label class="model-provider-field"><span>上下文窗口 <small>仅元数据</small></span><input class="input" id="model-config-context-window" type="number" min="1" step="1" placeholder="例如 128000" value="' + escAttr(current.context_window || '') + '" /></label>' +
             '<label class="model-provider-field"><span>最大输出 Token <small>仅元数据</small></span><input class="input" id="model-config-max-output" type="number" min="1" step="1" placeholder="例如 8192" value="' + escAttr(current.max_output_tokens || '') + '" /></label>' +
-            '<label class="model-provider-field model-provider-config-json"><span>默认 Body JSON <small>运行时可被节点高级参数覆盖</small></span><textarea class="input" id="model-config-default-body" spellcheck="false" placeholder="{&quot;max_tokens&quot;: 8192}">' + esc(JSON.stringify(current.default_body || {}, null, 2)) + '</textarea></label>' +
+            '<div class="model-provider-field model-provider-config-json"><div class="model-provider-config-json-header"><span>默认 Body JSON <small>运行时可被节点高级参数覆盖</small></span><button class="model-provider-json-beautify" id="model-config-default-body-beautify" type="button" title="格式化默认 Body JSON" aria-label="格式化默认 Body JSON">Beautify</button></div><textarea class="input" id="model-config-default-body" aria-label="默认 Body JSON" spellcheck="false" placeholder="' + escAttr(MODEL_DEFAULT_BODY_REFERENCE) + '">' + esc(defaultBodyText) + '</textarea></div>' +
         '</div>' +
         '<div class="modal-footer"><button class="btn btn-secondary" id="model-config-cancel" type="button">取消</button><button class="btn btn-primary" id="model-config-save" type="button">保存</button></div>' +
     '</div>';
     document.body.appendChild(overlay);
+    document.getElementById('model-config-default-body-beautify').addEventListener('click', beautifyProviderDefaultBody);
     document.getElementById('model-config-cancel').addEventListener('click', closeProviderModelConfig);
     document.getElementById('model-config-save').addEventListener('click', function () {
         saveProviderModelConfig(model);
     });
+}
+
+function beautifyProviderDefaultBody() {
+    var editor = document.getElementById('model-config-default-body');
+    var source = editor.value.trim();
+    if (!source) return;
+    try {
+        var parsed = JSON.parse(source);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+            throw new Error('默认 Body 必须是 JSON 对象');
+        }
+        editor.value = JSON.stringify(parsed, null, 2);
+    } catch (error) {
+        showToast(error instanceof SyntaxError ? '默认 Body 不是合法 JSON' : error.message, 'error');
+    }
 }
 
 function closeProviderModelConfig() {

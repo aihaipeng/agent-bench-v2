@@ -44,11 +44,12 @@ function closeExecutionModal() {
     if (overlay) overlay.classList.add('hidden');
 }
 
-function openExecutionModal(title, bodyHtml, onSave) {
+function openExecutionModal(title, bodyHtml, onSave, saveLabel) {
     var overlay = ensureExecutionModal();
     overlay.querySelector('#execution-modal-title').textContent = title;
     overlay.querySelector('#execution-modal-body').innerHTML = bodyHtml;
     var save = overlay.querySelector('#execution-modal-save');
+    save.textContent = saveLabel || '保存';
     save.disabled = false;
     save.onclick = async function () {
         save.disabled = true;
@@ -238,7 +239,7 @@ function renderWorkflowTable() {
             executionState.workflows.length ? '' : '新建 Workflow', 'workflow-empty-add'
         ) + '</td></tr>';
         var emptyAdd = document.getElementById('workflow-empty-add');
-        if (emptyAdd) emptyAdd.addEventListener('click', function () { openWorkflowEditor(); });
+        if (emptyAdd) emptyAdd.addEventListener('click', openWorkflowCreateDialog);
         return;
     }
     body.innerHTML = workflows.map(function (workflow) {
@@ -280,13 +281,50 @@ function viewWorkflows() {
                 '<tbody id="workflow-list-body"></tbody>' +
             '</table></div>' +
         '</section>';
-    document.getElementById('btn-workflow-add').addEventListener('click', function () { openWorkflowEditor(); });
+    document.getElementById('btn-workflow-add').addEventListener('click', openWorkflowCreateDialog);
     document.getElementById('btn-workflow-refresh').addEventListener('click', loadWorkflows);
     document.getElementById('workflow-search').addEventListener('input', renderWorkflowTable);
     loadWorkflows();
 }
 
-async function openWorkflowEditor(workflowId) {
+function workflowCreateFormHtml() {
+    return '<div class="execution-form-grid">' +
+        '<label class="form-row form-row-full"><span class="form-label">名称 <b class="required">*</b></span><input class="input" id="workflow-create-name" maxlength="120" autocomplete="off" /></label>' +
+        '<label class="form-row form-row-full"><span class="form-label">说明</span><textarea class="input execution-code-input" id="workflow-create-description" maxlength="2000" rows="5"></textarea></label>' +
+        '<div class="execution-form-error form-row-full hidden" id="workflow-create-error" role="alert"></div>' +
+    '</div>';
+}
+
+function showWorkflowCreateError(message) {
+    var error = document.getElementById('workflow-create-error');
+    error.textContent = message;
+    error.classList.remove('hidden');
+}
+
+function openWorkflowCreateDialog() {
+    openExecutionModal('新增工作流', workflowCreateFormHtml(), async function () {
+        var nameInput = document.getElementById('workflow-create-name');
+        var name = nameInput.value.trim();
+        var description = document.getElementById('workflow-create-description').value.trim();
+        if (!name) {
+            showWorkflowCreateError('名称不能为空');
+            nameInput.focus();
+            return;
+        }
+        closeExecutionModal();
+        await openWorkflowEditor(null, {name: name, description: description});
+    }, '创建');
+}
+
+function rememberWorkflow(workflow) {
+    var existingIndex = executionState.workflows.findIndex(function (item) {
+        return item.id === workflow.id;
+    });
+    if (existingIndex >= 0) executionState.workflows[existingIndex] = workflow;
+    else executionState.workflows.unshift(workflow);
+}
+
+async function openWorkflowEditor(workflowId, initialMetadata) {
     currentView = 'workflows';
     if (!window.AgentBenchWorkflowCanvas) {
         showToast('工作流画布资源加载失败', 'error');
@@ -303,8 +341,10 @@ async function openWorkflowEditor(workflowId) {
     }
     window.AgentBenchWorkflowCanvas.mount({
         id: workflowId || null,
-        name: workflow ? workflow.name : '未命名工作流',
+        name: workflow ? workflow.name : initialMetadata.name,
+        description: workflow ? workflow.description : initialMetadata.description,
         draft: workflow,
+        createOnMount: !workflowId,
         onPersist: async function (draft) {
             var body = {
                 name: draft.name,
@@ -318,11 +358,16 @@ async function openWorkflowEditor(workflowId) {
                 ? await API.put('/api/workflow-drafts/' + encodeURIComponent(draft.id) + query, body)
                 : await API.post('/api/workflow-drafts' + query, body);
             workflow = data.workflow;
-            var existingIndex = executionState.workflows.findIndex(function (item) {
-                return item.id === workflow.id;
-            });
-            if (existingIndex >= 0) executionState.workflows[existingIndex] = workflow;
-            else executionState.workflows.unshift(workflow);
+            rememberWorkflow(workflow);
+            return workflow;
+        },
+        onPersistMetadata: async function (metadata) {
+            var data = await API.patch(
+                '/api/workflow-drafts/' + encodeURIComponent(metadata.id) + '/metadata',
+                {name: metadata.name, description: metadata.description}
+            );
+            workflow = data.workflow;
+            rememberWorkflow(workflow);
             return workflow;
         },
         onClose: function () {

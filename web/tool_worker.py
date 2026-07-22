@@ -100,18 +100,49 @@ def _serialize_response(value: Any) -> Any:
     return serialized
 
 
-def _execute_python(payload: dict[str, Any]) -> Any:
+def _execute_python(payload: dict[str, Any]) -> tuple[Any, dict[str, Any] | None]:
     code = payload.get("code")
     if not isinstance(code, str) or not code.strip():
         raise ValueError("main.py 不能为空")
+    requested_names = payload.get("output_variable_names")
     namespace = {
         "__name__": "__tool_runtime__",
         "inputs": payload["inputs"],
         "config": payload["config"],
-        "response": None,
     }
+    if requested_names is None:
+        namespace["response"] = None
     exec(compile(code, "<workflow-node-main.py>", "exec"), namespace, namespace)
-    return namespace.get("response")
+    if requested_names is None:
+        return namespace.get("response"), None
+    if not isinstance(requested_names, list) or not all(
+        isinstance(name, str) and name for name in requested_names
+    ):
+        raise ValueError("output_variable_names 必须是非空字符串数组")
+    captured: dict[str, Any] = {}
+    for name in requested_names:
+        if name not in namespace:
+            captured[name] = None
+            print(
+                f"[WARNING] Python 顶层变量不存在，输出 null: {name}",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            captured[name] = namespace[name]
+    return None, captured
+
+
+def _serialize_python_variables(values: dict[str, Any]) -> dict[str, Any]:
+    serialized: dict[str, Any] = {}
+    for name, value in values.items():
+        try:
+            serialized[name] = _serialize_response(value)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"Python 顶层变量无法序列化: {name} ({type(exc).__name__}: {exc})"
+            ) from exc
+    return serialized
 
 
 def _execute_http(payload: dict[str, Any]) -> Any:
@@ -163,17 +194,20 @@ def main() -> None:
 
     stdout_writer = _LineWriter("stdout")
     stderr_writer = _LineWriter("stderr")
+    python_variables: dict[str, Any] | None = None
     try:
         with redirect_stdout(stdout_writer), redirect_stderr(stderr_writer):
             if payload.get("mode") == "HTTP_CONFIG":
                 response = _execute_http(payload)
             elif payload.get("mode") == "PYTHON":
-                response = _execute_python(payload)
+                response, python_variables = _execute_python(payload)
             else:
                 raise ValueError("未知工具执行模式")
         stdout_writer.flush()
         stderr_writer.flush()
         result = {"ok": True, "response": _serialize_response(response)}
+        if payload.get("mode") == "PYTHON" and python_variables is not None:
+            result["python_variables"] = _serialize_python_variables(python_variables)
     except Exception as exc:  # noqa: BLE001
         with redirect_stderr(stderr_writer):
             traceback.print_exc()

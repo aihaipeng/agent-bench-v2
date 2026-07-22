@@ -73,6 +73,15 @@ def test_model_provider_frontend_implements_management_and_connection_flow():
     assert 'id="model-config-context-window"' in source
     assert 'id="model-config-max-output"' in source
     assert 'id="model-config-default-body"' in source
+    assert "var MODEL_DEFAULT_BODY_REFERENCE = JSON.stringify({" in source
+    assert "thinking: {type: 'disabled'}" in source
+    assert "response_format: {type: 'json_object'}" in source
+    assert "function modelProviderDefaultBodyText(defaultBody)" in source
+    assert "escAttr(MODEL_DEFAULT_BODY_REFERENCE)" in source
+    assert 'id="model-config-default-body-beautify"' in source
+    assert 'aria-label="格式化默认 Body JSON"' in source
+    assert "function beautifyProviderDefaultBody()" in source
+    assert "默认 Body 不是合法 JSON" in source
     assert "model_configs: JSON.parse(JSON.stringify(modelProviderState.modelConfigs))" in source
     assert "protocol: connection.protocol" in source
     assert "'MANUAL'" not in source
@@ -88,4 +97,18 @@ def test_model_provider_styles_use_existing_theme_contract_and_desktop_layout():
     assert "grid-template-columns: minmax(140px, 0.7fr) minmax(190px, 1.3fr)" in source
     assert ".model-provider-switch input:checked + .model-provider-switch-track" in source
     assert ".model-provider-proxy-help[open] .model-provider-proxy-help-panel" in source
+    assert ".model-provider-config-json-header" in source
+    assert ".model-provider-json-beautify" in source
+    assert ".model-provider-config-json textarea::placeholder" in source
+    assert ".model-provider-config-json textarea.input" in source
+    config_textarea_rule = source[
+        source.index(".model-provider-config-json textarea.input"):
+        source.index("}", source.index(".model-provider-config-json textarea.input"))
+    ]
+    assert "min-height: 280px" in config_textarea_rule
+    placeholder_rule = source[
+        source.index(".model-provider-config-json textarea::placeholder"):
+        source.index("}", source.index(".model-provider-config-json textarea::placeholder"))
+    ]
+    assert "font-style: italic" in placeholder_rule
     assert "@media" not in source

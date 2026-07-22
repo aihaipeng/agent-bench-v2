@@ -1,6 +1,11 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
+import {python} from '@codemirror/lang-python';
+import {EditorState} from '@codemirror/state';
+import {EditorView} from '@codemirror/view';
+import {oneDark} from '@codemirror/theme-one-dark';
 import dagre from '@dagrejs/dagre';
+import {basicSetup} from 'codemirror';
 import parseCurl from 'parse-curl';
 import {Rnd} from 'react-rnd';
 import {split as splitShellWords} from 'shellwords';
@@ -33,6 +38,7 @@ import {
     Copy,
     ExternalLink,
     Eye,
+    FileText,
     Globe2,
     LayoutGrid,
     LoaderCircle,
@@ -71,7 +77,15 @@ const NODE_STATUSES = ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'INTERRUPTED']
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 const HTTP_BODY_TYPES = ['none', 'form-data', 'x-www-form-urlencoded', 'raw', 'binary'];
 const OUTPUT_VARIABLE_TYPES = ['AUTO', 'STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'OBJECT', 'ARRAY'];
-const DEFAULT_MAIN_PY = 'response = inputs';
+const DEFAULT_AGENT_MAIN_PY = 'response = inputs';
+const DEFAULT_SCRIPT_MAIN_PY = 'msg = "介绍一下自己"\nprint(msg)';
+const LLM_PARAMETERS_REFERENCE = JSON.stringify({
+    thinking: {type: 'disabled'},
+    temperature: 0,
+    top_p: 0.8,
+    max_tokens: 1024,
+    response_format: {type: 'json_object'},
+}, null, 2);
 
 function nodeId(type) {
     return `${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -91,6 +105,56 @@ function formatRunDate(value) {
     if (Number.isNaN(date.getTime())) return '-- --:--:--';
     const pad = (part) => String(part).padStart(2, '0');
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function modelParametersEditorText(parameters) {
+    const editableParameters = {...(parameters || {})};
+    delete editableParameters.stream;
+    return Object.keys(editableParameters).length
+        ? JSON.stringify(editableParameters, null, 2)
+        : '';
+}
+
+function normalizeTokenCount(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? Math.round(count) : null;
+}
+
+function streamingUsageFromResponse(responseBody) {
+    const usage = {};
+    String(responseBody || '').split(/\r?\n/).forEach((rawLine) => {
+        const line = rawLine.trim();
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') return;
+        try {
+            const payload = JSON.parse(data);
+            if (!isPlainObject(payload)) return;
+            const candidates = [payload.usage];
+            if (isPlainObject(payload.message)) candidates.push(payload.message.usage);
+            candidates.forEach((candidate) => {
+                if (isPlainObject(candidate)) Object.assign(usage, candidate);
+            });
+        } catch (_error) {
+            // Raw streaming output can contain non-JSON provider events.
+        }
+    });
+    return Object.keys(usage).length ? usage : null;
+}
+
+function formatRunTokenUsage(run) {
+    const usage = isPlainObject(run?.usage)
+        ? run.usage
+        : streamingUsageFromResponse(run?.response_body) || {};
+    const total = normalizeTokenCount(usage.total_tokens);
+    if (total !== null) return `${total} tokens`;
+    const pairs = [
+        [normalizeTokenCount(usage.prompt_tokens), normalizeTokenCount(usage.completion_tokens)],
+        [normalizeTokenCount(usage.input_tokens), normalizeTokenCount(usage.output_tokens)],
+    ];
+    const pair = pairs.find(([input, output]) => input !== null || output !== null);
+    return pair ? `${(pair[0] || 0) + (pair[1] || 0)} tokens` : '-- tokens';
 }
 
 function cloneValue(value) {
@@ -165,7 +229,21 @@ function parameterDataSummary(value) {
     return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
+function hasBrowserTextSelection() {
+    return Boolean(window.getSelection?.()?.toString());
+}
+
 async function copyTextToClipboard(text) {
+    try {
+        const response = await fetch('/api/local/clipboard', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({text}),
+        });
+        if (response.ok) return;
+    } catch (_error) {
+        // The local clipboard endpoint is unavailable outside the desktop app.
+    }
     if (navigator.clipboard?.writeText) {
         try {
             await navigator.clipboard.writeText(text);
@@ -182,15 +260,169 @@ async function copyTextToClipboard(text) {
     textarea.style.opacity = '0';
     document.body.appendChild(textarea);
     let copied = false;
+    const handleCopy = (event) => {
+        if (!event.clipboardData) return;
+        event.clipboardData.setData('text/plain', text);
+        event.preventDefault();
+        copied = true;
+        event.stopImmediatePropagation();
+    };
     try {
+        document.addEventListener('copy', handleCopy, true);
         textarea.focus();
         textarea.select();
         textarea.setSelectionRange(0, textarea.value.length);
-        copied = document.execCommand('copy');
+        copied = document.execCommand('copy') || copied;
     } finally {
+        document.removeEventListener('copy', handleCopy, true);
         textarea.remove();
     }
-    if (!copied) throw new Error('浏览器拒绝了复制操作');
+    if (copied) return;
+    throw new Error('浏览器拒绝了复制操作');
+}
+
+function PythonCodeEditor({value, onChange}) {
+    const hostRef = useRef(null);
+    const viewRef = useRef(null);
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+
+    useEffect(() => {
+        if (!hostRef.current) return undefined;
+        const view = new EditorView({
+            parent: hostRef.current,
+            state: EditorState.create({
+                doc: value || '',
+                extensions: [
+                    basicSetup,
+                    python(),
+                    oneDark,
+                    EditorView.lineWrapping,
+                    EditorView.contentAttributes.of({
+                        'aria-label': 'main.py',
+                        spellcheck: 'false',
+                    }),
+                    EditorView.updateListener.of((update) => {
+                        if (update.docChanged) {
+                            onChangeRef.current(update.state.doc.toString());
+                        }
+                    }),
+                ],
+            }),
+        });
+        viewRef.current = view;
+        return () => {
+            view.destroy();
+            viewRef.current = null;
+        };
+    }, []);
+
+    useEffect(() => {
+        const view = viewRef.current;
+        const nextValue = value || '';
+        if (!view || view.state.doc.toString() === nextValue) return;
+        view.dispatch({
+            changes: {from: 0, to: view.state.doc.length, insert: nextValue},
+        });
+    }, [value]);
+
+    return <div className="wf-python-editor" ref={hostRef} />;
+}
+
+async function copyHttpLogContent(text, label) {
+    try {
+        await copyTextToClipboard(text);
+        if (window.showToast) window.showToast(`已复制${label.replace(/^复制/, '')}`, 'success');
+    } catch (error) {
+        if (window.showToast) window.showToast(error instanceof Error ? error.message : '复制失败', 'error');
+    }
+}
+
+function HttpLogCopyButton({text, label}) {
+    return (
+        <button
+            type="button"
+            className="wf-http-log-copy"
+            title={label}
+            aria-label={label}
+            onClick={() => copyHttpLogContent(text, label)}
+        >
+            <Copy size={13} />
+        </button>
+    );
+}
+
+function HttpLogSection({title, text}) {
+    return (
+        <section className="wf-http-log-section">
+            <header>
+                <strong>{title}</strong>
+                <HttpLogCopyButton text={text} label={`复制${title}`} />
+            </header>
+            <pre aria-label={`${title}内容`}>{text}</pre>
+        </section>
+    );
+}
+
+function rawHttpScalar(value) {
+    if (value === undefined || value === null) return '';
+    return typeof value === 'string' ? value : parameterDataText(value);
+}
+
+function appendHttpParameters(searchParams, values) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) return;
+    Object.entries(values).forEach(([key, value]) => {
+        const entries = Array.isArray(value) ? value : [value];
+        entries.forEach((entry) => searchParams.append(key, rawHttpScalar(entry)));
+    });
+}
+
+function rawHttpRequestUrl(request) {
+    const url = String(request?.url || '');
+    const params = request?.params;
+    if (!params || typeof params !== 'object' || Array.isArray(params) || !Object.keys(params).length) return url;
+    try {
+        const parsed = new URL(url);
+        appendHttpParameters(parsed.searchParams, params);
+        parsed.hash = '';
+        return parsed.toString();
+    } catch (_error) {
+        const searchParams = new URLSearchParams();
+        appendHttpParameters(searchParams, params);
+        const query = searchParams.toString();
+        return query ? `${url}${url.includes('?') ? '&' : '?'}${query}` : url;
+    }
+}
+
+function rawHttpRequestBody(request) {
+    const bodyType = String(request?.body_type || 'NONE').toUpperCase();
+    if (bodyType === 'NONE' || request?.body === undefined || request?.body === null) return '';
+    if (bodyType === 'FORM_DATA' || bodyType === 'FORM_URLENCODED') {
+        if (typeof request.body === 'string') return request.body;
+        const form = new URLSearchParams();
+        appendHttpParameters(form, request.body);
+        return form.toString();
+    }
+    return rawHttpScalar(request.body);
+}
+
+function rawHttpRequest(request) {
+    const method = String(request?.method || 'GET').toUpperCase();
+    const requestLine = `${method} ${rawHttpRequestUrl(request)} HTTP/1.1`;
+    const headers = request?.headers && typeof request.headers === 'object' && !Array.isArray(request.headers)
+        ? Object.entries(request.headers).map(([key, value]) => {
+            const headerValue = Array.isArray(value)
+                ? value.map((item) => rawHttpScalar(item)).join(', ')
+                : rawHttpScalar(value);
+            return `${key}: ${headerValue}`;
+        })
+        : [];
+    return [requestLine, ...headers, '', rawHttpRequestBody(request)].join('\n');
+}
+
+function HttpRequestLogSection({request}) {
+    const rawText = rawHttpRequest(request);
+    return <HttpLogSection title="request" text={rawText} />;
 }
 
 function runResultSummary(run) {
@@ -208,7 +440,7 @@ function runResultSummary(run) {
 }
 
 function emptyMappingRow() {
-    return {id: rowId(), name: '', type: 'AUTO', value: ''};
+    return {id: rowId(), name: '', type: 'AUTO', value: '', pythonVariable: ''};
 }
 
 function emptyKeyValueRow(key = '', value = '') {
@@ -219,7 +451,7 @@ function defaultHttpConfig() {
     return {
         method: 'POST',
         url: '',
-        headers: [],
+        headers: [emptyKeyValueRow('Content-Type', 'application/json')],
         params: [],
         bodyType: 'none',
         bodyText: '',
@@ -345,7 +577,8 @@ function makeNode(type, position, overrides = {}) {
                 userPrompt: '',
                 modelParameters: {},
             } : {}),
-            ...(['AGENT', 'SCRIPT'].includes(type) ? {mainPy: DEFAULT_MAIN_PY} : {}),
+            ...(type === 'AGENT' ? {mainPy: DEFAULT_AGENT_MAIN_PY} : {}),
+            ...(type === 'SCRIPT' ? {mainPy: DEFAULT_SCRIPT_MAIN_PY} : {}),
             ...overrides,
         },
     };
@@ -397,6 +630,14 @@ function graphFromDraft(draft) {
     const nodes = draft.nodes.map((stored) => {
         const type = stored.data?.nodeType || 'SCRIPT';
         const defaults = makeNode(type, stored.position || {x: 0, y: 0});
+        const storedData = cloneValue(stored.data || {});
+        if (type === 'SCRIPT' && Array.isArray(storedData.outputVariables)) {
+            storedData.outputVariables = storedData.outputVariables.map((row) => (
+                row?.name && !row.pythonVariable && row.value
+                    ? {...row, pythonVariable: row.name, value: ''}
+                    : row
+            ));
+        }
         return {
             ...defaults,
             ...cloneValue(stored),
@@ -404,7 +645,7 @@ function graphFromDraft(draft) {
             position: cloneValue(stored.position || {x: 0, y: 0}),
             data: {
                 ...defaults.data,
-                ...cloneValue(stored.data || {}),
+                ...storedData,
                 status: 'PENDING',
                 executionDurationMs: 0,
                 runHistory: [],
@@ -655,36 +896,86 @@ function ModelSelector({
 
 function NodeRunHistory({runs, nodeType}) {
     const [expandedRunId, setExpandedRunId] = useState(null);
+    const [copiedRunId, setCopiedRunId] = useState(null);
+    const copyResetTimerRef = useRef(null);
+    useEffect(() => () => {
+        if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
+    }, []);
+    const copyConsole = async (event, runId, text) => {
+        event.stopPropagation();
+        try {
+            await copyTextToClipboard(text);
+            setCopiedRunId(runId);
+            if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
+            copyResetTimerRef.current = window.setTimeout(() => setCopiedRunId(null), 1600);
+            if (window.showToast) window.showToast('控制台已复制', 'success');
+        } catch (error) {
+            if (window.showToast) window.showToast(error instanceof Error ? error.message : '复制失败', 'error');
+        }
+    };
     if (!runs.length) return <div className="wf-node-log-empty">暂无运行日志</div>;
     return (
         <div className="wf-llm-run-list">
             {runs.slice(0, 10).map((run) => {
                 const expanded = expandedRunId === run.id;
+                const scriptConsole = typeof run.console === 'string' && run.console
+                    ? run.console
+                    : `${run.stdout || ''}${run.stderr || ''}`;
                 const requestContent = run.request_body && Object.keys(run.request_body).length
                     ? parameterDataText(run.request_body, true)
                     : '';
                 const tracebackContent = run.error?.traceback || '';
                 return (
                     <article className={`wf-llm-run is-${String(run.status || 'FAILED').toLowerCase()}`} key={run.id}>
-                        <button type="button" className="wf-llm-run-summary" aria-expanded={expanded} onClick={() => setExpandedRunId(expanded ? null : run.id)}>
+                        <button type="button" className={`wf-llm-run-summary ${nodeType === 'LLM' ? 'has-token-usage' : ''}`} aria-expanded={expanded} onClick={() => setExpandedRunId(expanded ? null : run.id)}>
                             <ChevronRight className={expanded ? 'is-open' : ''} size={15} />
                             <time>{formatRunDate(run.finished_at || run.started_at)}</time>
                             <strong>{run.status}</strong>
                             <span className="wf-llm-run-duration">{formatExecutionDuration(run.duration_ms)}</span>
+                            {nodeType === 'LLM' && <span className="wf-llm-run-token">{formatRunTokenUsage(run)}</span>}
                             <span className="wf-llm-run-result">{runResultSummary(run)}</span>
                         </button>
                         {expanded && (
                             <div className="wf-llm-run-detail">
-                                <div className="wf-llm-run-meta">
-                                    <span>{run.provider_name ? `${run.provider_name} / ${run.model_name || '未知模型'}` : nodeType}</span>
-                                    {run.http_status && <span>HTTP {run.http_status}</span>}
-                                    {run.request_id && <code>{run.request_id}</code>}
-                                </div>
-                                {requestContent && <section><strong>原始请求</strong><pre>{requestContent}</pre></section>}
-                                {run.stdout && <section><strong>原始 stdout</strong><pre>{run.stdout}</pre></section>}
-                                {run.response_body && <section><strong>原始 response</strong><pre>{run.response_body}</pre></section>}
-                                {run.stderr && <section className="is-error"><strong>原始 stderr</strong><pre>{run.stderr}</pre></section>}
-                                {tracebackContent && <section className="is-error"><strong>错误 traceback</strong><pre>{tracebackContent}</pre></section>}
+                                {nodeType === 'HTTP' ? (
+                                    <>
+                                        {requestContent && <HttpRequestLogSection request={run.request_body} />}
+                                        {run.response_body && <HttpLogSection title="response" text={run.response_body} />}
+                                    </>
+                                ) : nodeType === 'SCRIPT' ? (
+                                    <div className="wf-script-console-wrap">
+                                        <button
+                                            type="button"
+                                            className="wf-script-console-copy"
+                                            onClick={(event) => copyConsole(event, run.id, scriptConsole)}
+                                            title={copiedRunId === run.id ? '已复制' : '复制控制台'}
+                                            aria-label={`复制控制台 ${formatRunDate(run.finished_at || run.started_at)}`}
+                                        >
+                                            {copiedRunId === run.id ? <Check size={14} /> : <Copy size={14} />}
+                                        </button>
+                                        <textarea
+                                            className="wf-script-console"
+                                            aria-label="Script 原始控制台"
+                                            readOnly
+                                            value={scriptConsole}
+                                            onPointerDown={(event) => event.stopPropagation()}
+                                            onCopy={(event) => event.stopPropagation()}
+                                        />
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="wf-llm-run-meta">
+                                            <span>{run.provider_name ? `${run.provider_name} / ${run.model_name || '未知模型'}` : nodeType}</span>
+                                            {run.http_status && <span>HTTP {run.http_status}</span>}
+                                            {run.request_id && <code>{run.request_id}</code>}
+                                        </div>
+                                        {requestContent && <HttpLogSection title="request" text={requestContent} />}
+                                        {run.stdout && <section><strong>原始 stdout</strong><pre>{run.stdout}</pre></section>}
+                                        {run.response_body && <HttpLogSection title="response" text={run.response_body} />}
+                                        {run.stderr && <section className="is-error"><strong>原始 stderr</strong><pre>{run.stderr}</pre></section>}
+                                        {tracebackContent && <section className="is-error"><strong>错误 traceback</strong><pre>{tracebackContent}</pre></section>}
+                                    </>
+                                )}
                             </div>
                         )}
                     </article>
@@ -718,7 +1009,7 @@ function Inspector({
     const [headersOpen, setHeadersOpen] = useState(true);
     const [paramsOpen, setParamsOpen] = useState(true);
     const [bodyMessage, setBodyMessage] = useState('');
-    const [modelParametersText, setModelParametersText] = useState('{}');
+    const [modelParametersText, setModelParametersText] = useState('');
     const [modelParametersError, setModelParametersError] = useState('');
     const [advancedOpen, setAdvancedOpen] = useState(false);
     const [variablesOpen, setVariablesOpen] = useState(false);
@@ -736,9 +1027,7 @@ function Inspector({
         setParamsOpen(true);
         setBodyMessage('');
         setSelectedParameterIndex(null);
-        const editableParameters = {...(node?.data.modelParameters || {})};
-        delete editableParameters.stream;
-        setModelParametersText(JSON.stringify(editableParameters, null, 2));
+        setModelParametersText(modelParametersEditorText(node?.data.modelParameters));
         setModelParametersError('');
         setAdvancedOpen(false);
         setVariablesOpen(false);
@@ -754,7 +1043,8 @@ function Inspector({
     const isHttp = node.data.nodeType === 'HTTP';
     const isLlm = node.data.nodeType === 'LLM';
     const isScript = node.data.nodeType === 'SCRIPT';
-    const showParametersTab = !isLlm && !isScript;
+    const showCodeEditor = meta.executable && !isHttp && !isLlm;
+    const showParametersTab = !isHttp && !isLlm && !isScript;
     const streamEnabled = isLlm && node.data.modelParameters?.stream === true;
     const showOutputVariables = !isLlm || !streamEnabled;
     const modelReference = modelReferenceStatus(
@@ -816,6 +1106,13 @@ function Inspector({
     });
     const updateModelParameters = (text) => {
         setModelParametersText(text);
+        if (!text.trim()) {
+            const emptyParameters = {};
+            if (streamEnabled) emptyParameters.stream = true;
+            setModelParametersError('');
+            onChange({modelParameters: emptyParameters});
+            return;
+        }
         try {
             const parsed = JSON.parse(text);
             if (!isPlainObject(parsed)) throw new Error('高级参数必须是 JSON 对象');
@@ -827,13 +1124,25 @@ function Inspector({
             setModelParametersError(error instanceof SyntaxError ? '高级参数不是合法 JSON' : error.message);
         }
     };
+    const beautifyModelParameters = () => {
+        if (!modelParametersText.trim()) {
+            setModelParametersError('');
+            return;
+        }
+        try {
+            const parsed = JSON.parse(modelParametersText);
+            if (!isPlainObject(parsed)) throw new Error('高级参数必须是 JSON 对象');
+            delete parsed.stream;
+            updateModelParameters(JSON.stringify(parsed, null, 2));
+        } catch (error) {
+            setModelParametersError(error instanceof SyntaxError ? '高级参数不是合法 JSON' : error.message);
+        }
+    };
     const setStreamMode = (enabled) => {
         const next = {...(node.data.modelParameters || {})};
         if (enabled) next.stream = true;
         else delete next.stream;
-        const editableParameters = {...next};
-        delete editableParameters.stream;
-        setModelParametersText(JSON.stringify(editableParameters, null, 2));
+        setModelParametersText(modelParametersEditorText(next));
         setModelParametersError('');
         onChange({modelParameters: next});
     };
@@ -993,7 +1302,6 @@ function Inspector({
                 )}
                 <div className="wf-inspector-tabs">
                     <button type="button" className={tab === 'settings' ? 'is-active' : ''} onClick={() => setTab('settings')}>设置</button>
-                    {meta.executable && !isLlm && <button type="button" className={tab === 'code' ? 'is-active' : ''} onClick={() => setTab('code')}>代码</button>}
                     {showParametersTab && <button type="button" className={tab === 'parameters' ? 'is-active' : ''} onClick={() => setTab('parameters')}>参数</button>}
                     <button type="button" className={tab === 'logs' ? 'is-active' : ''} onClick={() => setTab('logs')}>日志</button>
                 </div>
@@ -1005,24 +1313,26 @@ function Inspector({
                             {isLlm && (
                                 <section className="wf-llm-model-section wf-editor-full-row">
                                     <div className="wf-llm-section-title"><BrainCircuit size={15} /><strong>模型配置</strong></div>
-                                    <label className="wf-llm-model-field">
-                                        <span>模型</span>
-                                        <ModelSelector
-                                            providers={providers}
-                                            loadState={providerLoadState}
-                                            loadError={providerLoadError}
-                                            providerId={node.data.providerId || ''}
-                                            modelName={node.data.modelName || ''}
-                                            onRefresh={onRefreshProviders}
-                                            onSelect={(providerId, modelName) => onChange({providerId, modelName})}
-                                        />
-                                    </label>
-                                    <div className="wf-llm-stream-field">
-                                        <span>流式输出</span>
-                                        <label className="wf-llm-stream-switch">
-                                            <input type="checkbox" role="switch" aria-label="流式输出" checked={streamEnabled} onChange={(event) => setStreamMode(event.target.checked)} />
-                                            <i aria-hidden="true"><span /></i>
+                                    <div className="wf-llm-model-row">
+                                        <label className="wf-llm-model-field">
+                                            <span>模型</span>
+                                            <ModelSelector
+                                                providers={providers}
+                                                loadState={providerLoadState}
+                                                loadError={providerLoadError}
+                                                providerId={node.data.providerId || ''}
+                                                modelName={node.data.modelName || ''}
+                                                onRefresh={onRefreshProviders}
+                                                onSelect={(providerId, modelName) => onChange({providerId, modelName})}
+                                            />
                                         </label>
+                                        <div className="wf-llm-stream-field">
+                                            <span>流式输出</span>
+                                            <label className="wf-llm-stream-switch">
+                                                <input type="checkbox" role="switch" aria-label="流式输出" checked={streamEnabled} onChange={(event) => setStreamMode(event.target.checked)} />
+                                                <i aria-hidden="true"><span /></i>
+                                            </label>
+                                        </div>
                                     </div>
                                     <label className="wf-llm-prompt-field">
                                         <span>系统提示词</span>
@@ -1034,7 +1344,15 @@ function Inspector({
                                     </label>
                                     <div className="wf-llm-advanced">
                                         <button type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((open) => !open)}><span>高级参数</span><ChevronRight className={advancedOpen ? 'is-open' : ''} size={15} /></button>
-                                        {(advancedOpen || modelParametersError) && <textarea aria-label="模型高级参数 JSON" spellCheck="false" value={modelParametersText} onChange={(event) => updateModelParameters(event.target.value)} />}
+                                        {(advancedOpen || modelParametersError) && (
+                                            <div className="wf-llm-json-editor">
+                                                <div className="wf-llm-json-toolbar">
+                                                    <span>JSON</span>
+                                                    <button type="button" onClick={beautifyModelParameters} title="格式化模型高级参数 JSON" aria-label="格式化模型高级参数 JSON"><WandSparkles size={13} />Beautify</button>
+                                                </div>
+                                                <textarea aria-label="模型高级参数 JSON" spellCheck="false" value={modelParametersText} placeholder={LLM_PARAMETERS_REFERENCE} onChange={(event) => updateModelParameters(event.target.value)} />
+                                            </div>
+                                        )}
                                         {modelParametersError && <span className="wf-model-parameters-error" role="alert">{modelParametersError}</span>}
                                     </div>
                                 </section>
@@ -1096,6 +1414,15 @@ function Inspector({
                                     </section>
                                 </section>
                             )}
+                            {showCodeEditor && (
+                                <section className="wf-embedded-code-editor wf-editor-full-row">
+                                    <div className="wf-code-meta"><span>main.py</span><span>Python</span></div>
+                                    <PythonCodeEditor
+                                        value={node.data.mainPy ?? (isScript ? DEFAULT_SCRIPT_MAIN_PY : DEFAULT_AGENT_MAIN_PY)}
+                                        onChange={(mainPy) => onChange({mainPy})}
+                                    />
+                                </section>
+                            )}
                             <section className="wf-config-section wf-editor-full-row">
                                 <div className="wf-config-title"><Settings2 size={15} /><strong>运行配置</strong></div>
                                 <button type="button" aria-expanded={retryOpen} onClick={() => setRetryOpen((open) => !open)}><span>超时与重试</span><ChevronRight className={retryOpen ? 'is-open' : ''} size={15} /></button>
@@ -1115,8 +1442,12 @@ function Inspector({
                                                 {outputVariables.map((row, index) => (
                                                     <div className="wf-output-variable-row" key={row.id}>
                                                         <label><span>变量名</span><input aria-label={`输出变量名 ${index + 1}`} value={row.name} onChange={(event) => updateOutputVariable(row.id, {name: event.target.value})} /></label>
+                                                        {isScript ? (
+                                                            <label><span>Python 变量</span><input aria-label={`Python 顶层变量 ${index + 1}`} value={row.pythonVariable || ''} onChange={(event) => updateOutputVariable(row.id, {pythonVariable: event.target.value})} /></label>
+                                                        ) : (
+                                                            <label><span>提取表达式</span><input aria-label={`输出变量 ${index + 1}`} value={row.value || ''} onChange={(event) => updateOutputVariable(row.id, {value: event.target.value})} /></label>
+                                                        )}
                                                         <label><span>类型</span><select aria-label={`输出变量类型 ${index + 1}`} value={row.type || 'AUTO'} onChange={(event) => updateOutputVariable(row.id, {type: event.target.value})}>{OUTPUT_VARIABLE_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}</select></label>
-                                                        <label><span>提取表达式</span><input aria-label={`输出变量 ${index + 1}`} value={row.value} onChange={(event) => updateOutputVariable(row.id, {value: event.target.value})} /></label>
                                                         {index === 0 ? (
                                                             <button type="button" className="wf-inline-icon-button" onClick={addOutputVariable} title="添加输出变量" aria-label="添加输出变量"><Plus size={15} /></button>
                                                         ) : (
@@ -1130,11 +1461,6 @@ function Inspector({
                                 )}
                             </section>
                         </div>
-                    </div>
-                ) : tab === 'code' ? (
-                    <div className="wf-inspector-body wf-code-panel">
-                        <div className="wf-code-meta"><span>main.py</span><span>Python</span></div>
-                        <textarea aria-label="main.py" spellCheck="false" value={node.data.mainPy ?? DEFAULT_MAIN_PY} onChange={(event) => onChange({mainPy: event.target.value})} />
                     </div>
                 ) : tab === 'parameters' && showParametersTab ? (
                     <div className="wf-inspector-body wf-parameter-panel">
@@ -1199,12 +1525,26 @@ function WorkflowStudio({options}) {
         : [emptyMappingRow()]);
     const [nodeSaveNotice, setNodeSaveNotice] = useState(null);
     const [workflowName, setWorkflowName] = useState(options.name || '未命名工作流');
+    const [workflowDescription, setWorkflowDescription] = useState(
+        options.description ?? options.draft?.description ?? '',
+    );
+    const [nameEditing, setNameEditing] = useState(false);
+    const [descriptionEditing, setDescriptionEditing] = useState(false);
     const [workflowId, setWorkflowId] = useState(options.id || null);
     const [saveState, setSaveState] = useState(options.id ? '已保存' : '未保存');
     const [modelProviders, setModelProviders] = useState([]);
     const [providerLoadState, setProviderLoadState] = useState('loading');
     const [providerLoadError, setProviderLoadError] = useState('');
     const timers = useRef([]);
+    const workflowIdRef = useRef(options.id || null);
+    const creationAttempted = useRef(false);
+    const creationPromise = useRef(null);
+    const nameEditCancelled = useRef(false);
+    const descriptionEditCancelled = useRef(false);
+    const savedMetadata = useRef({
+        name: (options.name || '未命名工作流').trim(),
+        description: String(options.description ?? options.draft?.description ?? '').trim(),
+    });
     const pasteSequence = useRef(0);
     const marqueeRef = useRef(null);
     const initialLayoutDone = useRef(false);
@@ -1245,9 +1585,12 @@ function WorkflowStudio({options}) {
         loadModelProviders();
     }, [loadModelProviders]);
 
-    const persistDraft = useCallback(async ({forNodeRun = false} = {}) => {
+    const persistDraft = useCallback(async ({forNodeRun = false, metadata = null} = {}) => {
         if (!options.onPersist) throw new Error('Workflow 持久化入口不可用');
-        const name = workflowName.trim();
+        const pendingCreation = creationPromise.current;
+        if (pendingCreation) await pendingCreation;
+        const name = String(metadata?.name ?? workflowName).trim();
+        const description = String(metadata?.description ?? workflowDescription).trim();
         if (!name) throw new Error('Workflow 名称不能为空');
         if (!forNodeRun) {
             const graphError = validateWorkflowGraph(nodes, edges);
@@ -1259,15 +1602,20 @@ function WorkflowStudio({options}) {
         if (!forNodeRun) setSaveState('正在保存');
         try {
             const saved = await options.onPersist({
-                id: workflowId,
+                id: workflowIdRef.current,
                 name,
-                description: options.draft?.description || '',
+                description,
                 nodes: nodes.map(serializableNode),
                 edges: edges.map(serializableEdge),
                 global_variables: cloneValue(globalVariables),
                 forNodeRun,
             });
+            workflowIdRef.current = saved.id;
             setWorkflowId(saved.id);
+            savedMetadata.current = {
+                name: saved.name ?? name,
+                description: saved.description ?? description,
+            };
             if (!forNodeRun) {
                 setSaveState('已保存');
                 setNodes((current) => current.map((node) => ({
@@ -1280,7 +1628,91 @@ function WorkflowStudio({options}) {
             if (!forNodeRun) setSaveState('保存失败');
             throw error;
         }
-    }, [edges, globalVariables, nodes, options, setNodes, workflowId, workflowName]);
+    }, [edges, globalVariables, nodes, options, setNodes, workflowDescription, workflowName]);
+
+    const persistMetadata = useCallback(async (nextName, nextDescription) => {
+        const name = String(nextName).trim();
+        const description = String(nextDescription).trim();
+        if (!name) {
+            if (window.showToast) window.showToast('Workflow 名称不能为空', 'error');
+            return false;
+        }
+        setSaveState('正在保存');
+        try {
+            if (creationPromise.current) await creationPromise.current;
+            if (!workflowIdRef.current) {
+                await persistDraft({forNodeRun: true, metadata: {name, description}});
+            } else {
+                if (!options.onPersistMetadata) throw new Error('Workflow 元数据持久化入口不可用');
+                const saved = await options.onPersistMetadata({
+                    id: workflowIdRef.current,
+                    name,
+                    description,
+                });
+                workflowIdRef.current = saved.id;
+                setWorkflowId(saved.id);
+                savedMetadata.current = {
+                    name: saved.name ?? name,
+                    description: saved.description ?? description,
+                };
+            }
+            setWorkflowName(savedMetadata.current.name);
+            setWorkflowDescription(savedMetadata.current.description);
+            setSaveState('已保存');
+            return true;
+        } catch (error) {
+            setSaveState('保存失败');
+            if (window.showToast) {
+                window.showToast(error instanceof Error ? error.message : 'Workflow 元数据保存失败', 'error');
+            }
+            return false;
+        }
+    }, [options, persistDraft]);
+
+    const commitWorkflowName = useCallback(async () => {
+        if (nameEditCancelled.current) {
+            nameEditCancelled.current = false;
+            setWorkflowName(savedMetadata.current.name);
+            setNameEditing(false);
+            return;
+        }
+        if (!workflowName.trim()) {
+            setWorkflowName(savedMetadata.current.name);
+            setNameEditing(false);
+            if (window.showToast) window.showToast('Workflow 名称不能为空', 'error');
+            return;
+        }
+        if (await persistMetadata(workflowName, workflowDescription)) setNameEditing(false);
+    }, [persistMetadata, workflowDescription, workflowName]);
+
+    const commitWorkflowDescription = useCallback(async () => {
+        if (descriptionEditCancelled.current) {
+            descriptionEditCancelled.current = false;
+            setWorkflowDescription(savedMetadata.current.description);
+            setDescriptionEditing(false);
+            return;
+        }
+        if (await persistMetadata(workflowName, workflowDescription)) setDescriptionEditing(false);
+    }, [persistMetadata, workflowDescription, workflowName]);
+
+    useEffect(() => {
+        if (!options.createOnMount || workflowIdRef.current || creationAttempted.current) return;
+        creationAttempted.current = true;
+        setSaveState('正在创建');
+        const pending = persistDraft({forNodeRun: true});
+        creationPromise.current = pending;
+        pending
+            .then(() => setSaveState('已保存'))
+            .catch((error) => {
+                setSaveState('创建失败');
+                if (window.showToast) {
+                    window.showToast(error instanceof Error ? error.message : 'Workflow 创建失败', 'error');
+                }
+            })
+            .finally(() => {
+                if (creationPromise.current === pending) creationPromise.current = null;
+            });
+    }, [options.createOnMount, persistDraft]);
 
     const closeMenus = useCallback(() => {
         setContextMenu(null);
@@ -1350,7 +1782,7 @@ function WorkflowStudio({options}) {
     }, [setNodes, workflowId]);
 
     const loadNodeVariables = useCallback(async (id) => {
-        const activeWorkflowId = await persistDraft();
+        const activeWorkflowId = await persistDraft({forNodeRun: true});
         const response = await fetch(`/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}/variables`, {
             headers: {accept: 'application/json'},
         });
@@ -1775,6 +2207,7 @@ function WorkflowStudio({options}) {
         const selectedEdges = edges.filter((edge) => edge.selected).map((edge) => edge.id);
         const control = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
+        if (control && key === 'c' && hasBrowserTextSelection()) return;
         if (control && key === 'z') {
             event.preventDefault();
             if (event.shiftKey) redo();
@@ -1803,6 +2236,7 @@ function WorkflowStudio({options}) {
     }, [clipboard, copyNodes, deleteElements, edges, nodes, pasteClipboard, redo, undo]);
 
     const handleCopy = useCallback((event) => {
+        if (hasBrowserTextSelection()) return;
         const target = event.target;
         if (target instanceof HTMLElement && (
             target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
@@ -1935,8 +2369,58 @@ function WorkflowStudio({options}) {
                     <button type="button" className="wf-icon-button" onClick={close} title="返回工作流管理" aria-label="返回工作流管理"><ArrowLeft size={18} /></button>
                     <span className="wf-header-divider" />
                     <span className="wf-workflow-mark"><Sparkles size={17} /></span>
-                    <input value={workflowName} onChange={(event) => {setWorkflowName(event.target.value); setSaveState('未保存');}} aria-label="工作流名称" />
+                    {nameEditing ? (
+                        <input
+                            autoFocus
+                            value={workflowName}
+                            maxLength={120}
+                            onChange={(event) => {setWorkflowName(event.target.value); setSaveState('未保存');}}
+                            onBlur={commitWorkflowName}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter') event.currentTarget.blur();
+                                if (event.key === 'Escape') {
+                                    nameEditCancelled.current = true;
+                                    event.currentTarget.blur();
+                                }
+                            }}
+                            aria-label="工作流名称"
+                        />
+                    ) : (
+                        <button
+                            type="button"
+                            className="wf-workflow-name"
+                            onDoubleClick={() => setNameEditing(true)}
+                        >{workflowName}</button>
+                    )}
                     <span className="wf-save-state"><i />{saveState}</span>
+                </div>
+                <div className={`wf-header-description ${descriptionEditing ? 'is-editing' : ''}`}>
+                    <FileText size={15} />
+                    {descriptionEditing ? (
+                        <div className="wf-description-editor">
+                            <textarea
+                                autoFocus
+                                value={workflowDescription}
+                                maxLength={2000}
+                                rows={5}
+                                onChange={(event) => {setWorkflowDescription(event.target.value); setSaveState('未保存');}}
+                                onBlur={commitWorkflowDescription}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Escape') {
+                                        descriptionEditCancelled.current = true;
+                                        event.currentTarget.blur();
+                                    }
+                                }}
+                                aria-label="工作流说明"
+                            />
+                        </div>
+                    ) : (
+                        <button
+                            type="button"
+                            aria-label="工作流说明"
+                            onDoubleClick={() => setDescriptionEditing(true)}
+                        >{workflowDescription || '添加工作流说明'}</button>
+                    )}
                 </div>
                 <div className="wf-header-actions">
                     {workflowRunState !== 'IDLE' && <span className={`wf-workflow-timer is-${workflowRunState.toLowerCase()}`} aria-label={`Workflow 执行耗时 ${formatExecutionDuration(workflowElapsedMs)}`}><LoaderCircle size={13} />{formatExecutionDuration(workflowElapsedMs)}</span>}

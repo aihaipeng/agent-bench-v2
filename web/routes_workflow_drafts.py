@@ -13,7 +13,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from web.tool_runtime import interrupt_tool_run, stream_tool_worker
 
 from execution import (
@@ -30,6 +30,7 @@ from execution import (
     build_anthropic_request,
     build_chat_completion_request,
     chat_completions_url,
+    extract_streaming_usage,
     invoke_anthropic,
     invoke_openai_compatible,
     model_http_client_options,
@@ -41,6 +42,8 @@ from execution import (
     workflow_variables,
     ancestor_node_ids,
     extract_output_variables,
+    extract_script_output_variables,
+    nearest_ancestor_output_sources,
     node_output_mappings,
     resolve_templates,
     validate_workflow_graph,
@@ -128,12 +131,44 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class WorkflowDraftSnapshot(_StrictModel):
+    """Response shape that does not revalidate persisted legacy node contracts."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    name: str
+    description: str
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    global_variables: list[dict[str, Any]]
+    id: str
+    created_at: str
+    updated_at: str
+
+
+class WorkflowDraftMetadataUpdate(_StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Workflow 名称不能为空")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str) -> str:
+        return value.strip()
+
+
 class WorkflowDraftEnvelope(_StrictModel):
-    workflow: WorkflowDraftRecord
+    workflow: WorkflowDraftSnapshot
 
 
 class WorkflowDraftListResponse(_StrictModel):
-    workflows: list[WorkflowDraftRecord]
+    workflows: list[WorkflowDraftSnapshot]
 
 
 class WorkflowNodeRunListResponse(_StrictModel):
@@ -212,6 +247,24 @@ def create_workflow_draft(
 @router.get("/{workflow_id}", response_model=WorkflowDraftEnvelope)
 def get_workflow_draft(workflow_id: str) -> WorkflowDraftEnvelope:
     return WorkflowDraftEnvelope(workflow=get_workflow_or_404(workflow_id))
+
+
+@router.patch("/{workflow_id}/metadata", response_model=WorkflowDraftEnvelope)
+def update_workflow_draft_metadata(
+    workflow_id: str,
+    body: WorkflowDraftMetadataUpdate,
+) -> WorkflowDraftEnvelope:
+    """独立保存名称和说明，不要求当前画布通过完整 DAG 校验。"""
+    get_workflow_or_404(workflow_id)
+    try:
+        saved = get_repository().update_metadata(
+            workflow_id,
+            name=body.name,
+            description=body.description,
+        )
+    except WorkflowDraftRepositoryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return WorkflowDraftEnvelope(workflow=saved)
 
 
 @router.put("/{workflow_id}", response_model=WorkflowDraftEnvelope)
@@ -331,7 +384,7 @@ def _rows_to_mapping(rows: Any, variables: dict[str, Any], label: str) -> dict[s
 
 def _http_execution_request(
     data: dict[str, Any], variables: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     config = data.get("httpConfig") if isinstance(data.get("httpConfig"), dict) else {}
     method = str(config.get("method", "POST")).upper().strip()
     url = resolve_templates(str(config.get("url", "")), variables).strip()
@@ -359,11 +412,18 @@ def _http_execution_request(
         "body_type": worker_body_type,
         "body": body,
     }
+    extraction_request = execution_request.copy()
+    if body_type == "RAW" and isinstance(body, str):
+        # Parsing is isolated from the request sent by the worker and the raw log.
+        try:
+            extraction_request["body"] = json.loads(body)
+        except json.JSONDecodeError:
+            pass
     logged_request = {
         **execution_request,
         "headers": _safe_http_headers(headers),
     }
-    return execution_request, logged_request
+    return execution_request, extraction_request, logged_request
 
 
 async def _run_python_or_http_node(
@@ -386,6 +446,7 @@ async def _run_python_or_http_node(
     started = time.perf_counter()
     input_snapshot["resolved_inputs"] = variables
     request_for_extraction: dict[str, Any] = {}
+    execution_request: dict[str, Any] = {}
     logged_request: dict[str, Any] = {}
     worker_payload: dict[str, Any] = {}
     run = WorkflowNodeRunRecord(
@@ -405,22 +466,28 @@ async def _run_python_or_http_node(
         events.append(_event("WARN", f"超时配置无效，使用默认值 120 秒: {exc}"))
     try:
         if node_type == "HTTP":
-            request_for_extraction, logged_request = _http_execution_request(data, variables)
+            execution_request, request_for_extraction, logged_request = (
+                _http_execution_request(data, variables)
+            )
             worker_payload = {
                 "mode": "HTTP_CONFIG",
                 "inputs": variables,
                 "config": config,
-                "http": request_for_extraction,
+                "http": execution_request,
             }
         elif node_type in {"AGENT", "SCRIPT"}:
             request_for_extraction = {"inputs": variables, "config": config}
             logged_request = request_for_extraction
             worker_payload = {
                 "mode": "PYTHON",
-                "code": data.get("mainPy") or "response = inputs",
+                "code": data.get("mainPy") or "pass",
                 "inputs": variables,
                 "config": config,
             }
+            if node_type == "SCRIPT":
+                worker_payload["output_variable_names"] = list(dict.fromkeys(
+                    mapping["path"] for mapping in node_output_mappings(node)
+                ))
         else:
             raise ValueError(f"不支持真实执行的节点类型: {node_type}")
         events.append(_event("INFO", "开始执行子进程"))
@@ -433,10 +500,12 @@ async def _run_python_or_http_node(
             worker_run_id,
             timeout_seconds,
         )
-        raw_response = worker_result.get("response") if "response" in worker_result else None
-        response_body = _json_text(raw_response) if "response" in worker_result else ""
+        output_key = "python_variables" if node_type == "SCRIPT" else "response"
+        raw_response = worker_result.get(output_key) if output_key in worker_result else None
+        response_body = _json_text(raw_response) if output_key in worker_result else ""
         stdout = str(worker_result.get("stdout", ""))
         stderr = str(worker_result.get("stderr", ""))
+        console = str(worker_result.get("console", ""))
         http_status = worker_result.get("http_status")
         if http_status is None and isinstance(raw_response, dict):
             http_status = raw_response.get("status_code")
@@ -452,6 +521,7 @@ async def _run_python_or_http_node(
                 "output": raw_response,
                 "stdout": stdout,
                 "stderr": stderr,
+                "console": console,
                 "response_body": response_body,
                 "http_status": http_status,
                 "error": {
@@ -463,12 +533,19 @@ async def _run_python_or_http_node(
         if not worker_result.get("ok"):
             message = str(worker_result.get("error") or "节点执行失败")
             raise RuntimeError(message)
-        output_variables = extract_output_variables(
-            node,
-            request=request_for_extraction,
-            response=raw_response,
-        )
-        events.append(_event("INFO", "输出变量提取完成"))
+        if node_type == "SCRIPT":
+            output_variables = extract_script_output_variables(
+                node,
+                raw_response if isinstance(raw_response, dict) else {},
+            )
+            events.append(_event("INFO", "Script 顶层变量采集完成"))
+        else:
+            output_variables = extract_output_variables(
+                node,
+                request=request_for_extraction,
+                response=raw_response,
+            )
+            events.append(_event("INFO", "输出变量提取完成"))
         return run.model_copy(update={
             "status": WorkflowNodeRunStatus.SUCCESS,
             "finished_at": utc_now_iso(),
@@ -479,6 +556,7 @@ async def _run_python_or_http_node(
             "output": raw_response,
             "stdout": stdout,
             "stderr": stderr,
+            "console": console,
             "response_body": response_body,
             "output_variables": output_variables,
             "http_status": http_status,
@@ -486,8 +564,9 @@ async def _run_python_or_http_node(
     except asyncio.CancelledError:
         events.append(_event("WARN", "用户中断节点"))
         worker_result = locals().get("worker_result", {})
-        raw_response = worker_result.get("response") if isinstance(worker_result, dict) else None
-        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and "response" in worker_result else ""
+        output_key = "python_variables" if node_type == "SCRIPT" else "response"
+        raw_response = worker_result.get(output_key) if isinstance(worker_result, dict) else None
+        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and output_key in worker_result else ""
         return run.model_copy(update={
             "status": WorkflowNodeRunStatus.INTERRUPTED,
             "finished_at": utc_now_iso(),
@@ -498,6 +577,7 @@ async def _run_python_or_http_node(
             "output": raw_response,
             "stdout": str(worker_result.get("stdout", "")) if isinstance(worker_result, dict) else "",
             "stderr": str(worker_result.get("stderr", "")) if isinstance(worker_result, dict) else "",
+            "console": str(worker_result.get("console", "")) if isinstance(worker_result, dict) else "",
             "response_body": response_body,
             "http_status": worker_result.get("http_status") if isinstance(worker_result, dict) else None,
             "error": {"type": "INTERRUPTED", "message": "用户中断节点", "traceback": ""},
@@ -506,8 +586,12 @@ async def _run_python_or_http_node(
         message = str(exc)
         events.append(_event("ERROR", message))
         worker_result = locals().get("worker_result", {})
-        raw_response = worker_result.get("response") if isinstance(worker_result, dict) else None
-        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and "response" in worker_result else ""
+        output_key = "python_variables" if node_type == "SCRIPT" else "response"
+        raw_response = worker_result.get(output_key) if isinstance(worker_result, dict) else None
+        response_body = _json_text(raw_response) if isinstance(worker_result, dict) and output_key in worker_result else ""
+        console = str(worker_result.get("console", "")) if isinstance(worker_result, dict) else ""
+        if node_type == "SCRIPT" and message and message not in console:
+            console += f"[ERROR] {message}\n"
         return run.model_copy(update={
             "status": WorkflowNodeRunStatus.FAILED,
             "finished_at": utc_now_iso(),
@@ -518,6 +602,7 @@ async def _run_python_or_http_node(
             "output": raw_response,
             "stdout": str(worker_result.get("stdout", "")) if isinstance(worker_result, dict) else "",
             "stderr": str(worker_result.get("stderr", "")) if isinstance(worker_result, dict) else "",
+            "console": console,
             "response_body": response_body,
             "http_status": worker_result.get("http_status") if isinstance(worker_result, dict) else None,
             "error": {
@@ -550,11 +635,19 @@ def _execution_variable_values(
 ) -> dict[str, Any]:
     values = workflow_variables(workflow.global_variables)
     node_by_id = {node["id"]: node for node in workflow.nodes}
-    for ancestor_id in ancestor_node_ids(workflow.nodes, workflow.edges, node_id):
+    source_by_name = nearest_ancestor_output_sources(
+        workflow.nodes, workflow.edges, node_id
+    )
+    outputs_by_node: dict[str, dict[str, Any]] = {}
+    for source_id in set(source_by_name.values()):
         output_values, _run = _latest_output_values(
-            repository, workflow.id, node_by_id[ancestor_id]
+            repository, workflow.id, node_by_id[source_id]
         )
-        values.update(output_values)
+        outputs_by_node[source_id] = output_values
+    for name, source_id in source_by_name.items():
+        source_values = outputs_by_node[source_id]
+        if name in source_values:
+            values[name] = source_values[name]
     return values
 
 
@@ -871,6 +964,8 @@ async def stream_llm_node(
         http_status: int | None = None
         request_id: str | None = None
         safe_parts: list[str] = []
+        original_parts: list[str] = []
+        usage: dict[str, Any] | None = None
         try:
             with _ACTIVE_NODE_RUNS_LOCK:
                 interrupted_before_start = active.interrupted
@@ -917,6 +1012,13 @@ async def stream_llm_node(
                     model_defaults=model_defaults,
                     model_parameters=resolved_model_parameters,
                 )
+                stream_options = request_body.get("stream_options")
+                if not isinstance(stream_options, dict):
+                    stream_options = {}
+                request_body["stream_options"] = {
+                    **stream_options,
+                    "include_usage": True,
+                }
                 request_url = chat_completions_url(provider.base_url)
                 request_headers = {
                     "accept": "application/json",
@@ -926,7 +1028,6 @@ async def stream_llm_node(
             else:
                 raise ValueError(f"当前节点执行不支持协议: {provider.protocol}")
             events.append(_event("INFO", f"流式请求模型 {provider_name} / {model_name}"))
-            original_parts: list[str] = []
             async with httpx.AsyncClient(
                 **model_http_client_options(
                     provider.base_url,
@@ -964,7 +1065,9 @@ async def stream_llm_node(
                                 buffered_response, api_key, provider.proxy_password
                             )
                         )
-            events.append(_event("INFO", "流式原始响应接收完成，未执行解析"))
+            usage = extract_streaming_usage(original_body)
+            usage_message = "已提取 token usage" if usage else "供应商未返回 token usage"
+            events.append(_event("INFO", f"流式原始响应接收完成，{usage_message}；未执行输出解析"))
             completed = running.model_copy(
                 update={
                     "status": WorkflowNodeRunStatus.SUCCESS,
@@ -978,13 +1081,14 @@ async def stream_llm_node(
                     "output": response_body,
                     "response_body": response_body,
                     "output_variables": {},
-                    "usage": None,
+                    "usage": usage,
                     "http_status": http_status,
                     "request_id": request_id,
                 }
             )
         except asyncio.CancelledError:
             response_body = "".join(safe_parts)
+            usage = extract_streaming_usage("".join(original_parts))
             events.append(_event("WARN", "用户中断节点"))
             completed = running.model_copy(
                 update={
@@ -997,6 +1101,7 @@ async def stream_llm_node(
                     "request_body": request_body,
                     "events": events,
                     "response_body": response_body,
+                    "usage": usage,
                     "http_status": http_status,
                     "request_id": request_id,
                     "error": {"type": "INTERRUPTED", "message": "用户中断节点", "traceback": ""},

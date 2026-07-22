@@ -391,5 +391,36 @@
     gap: 16px;
 }
 
-.model-provider-config-json { grid-column: 1 / -1; }
-.model-provider-config-json textarea { min-height: 190px; resize: vertical; font-family: Consolas, "Courier New", monospace; line-height: 1.5; }
+.model-provider-config-json { min-width: 0; grid-column: 1 / -1; }
+.model-provider-config-json-header {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.model-provider-config-json-header > span {
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 700;
+}
+.model-provider-json-beautify {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface-muted);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.model-provider-json-beautify:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+}
+.model-provider-config-json textarea.input { min-height: 280px; resize: vertical; font-family: Consolas, "Courier New", monospace; line-height: 1.5; }
+.model-provider-config-json textarea::placeholder { color: var(--text-subtle); font-style: italic; opacity: 0.72; }

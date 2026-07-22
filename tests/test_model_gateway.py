@@ -10,6 +10,7 @@ from execution import (
     build_chat_completion_request,
     chat_completions_url,
     deep_merge_model_request,
+    extract_streaming_usage,
     invoke_anthropic,
     invoke_openai_compatible,
     model_http_client_options,
@@ -310,3 +311,29 @@ def test_parse_streaming_response_combines_output_and_usage():
         "usage": {"total_tokens": 12},
         "finish_reason": "stop",
     }
+
+
+def test_extract_streaming_usage_supports_openai_and_anthropic_events():
+    openai_body = (
+        'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":5,'
+        '"total_tokens":12}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    anthropic_body = (
+        'event: message_start\n'
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":9,'
+        '"output_tokens":1}}}\n\n'
+        'event: message_delta\n'
+        'data: {"type":"message_delta","usage":{"output_tokens":6}}\n\n'
+    )
+
+    assert extract_streaming_usage(openai_body) == {
+        "prompt_tokens": 7,
+        "completion_tokens": 5,
+        "total_tokens": 12,
+    }
+    assert extract_streaming_usage(anthropic_body) == {
+        "input_tokens": 9,
+        "output_tokens": 6,
+    }
+    assert extract_streaming_usage("data: not-json\n\n") is None

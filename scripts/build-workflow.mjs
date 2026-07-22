@@ -12,6 +12,7 @@ await build({
   target: "es2020",
   minify: true,
   legalComments: "linked",
+  external: ["/assets/*"],
   outfile: `${outputBase}.js`,
   logLevel: "info",
 });
