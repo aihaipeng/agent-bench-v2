@@ -6,6 +6,7 @@ import ast
 import json
 import math
 import re
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,7 @@ class _FilterToken:
 
 def node_output_mappings(node: dict[str, Any]) -> list[dict[str, str]]:
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    node_type = data.get("nodeType")
     raw_mappings = data.get("outputVariables")
     if not isinstance(raw_mappings, list):
         return []
@@ -44,9 +46,13 @@ def node_output_mappings(node: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(raw, dict):
             continue
         name = raw.get("name").strip() if isinstance(raw.get("name"), str) else ""
-        path = raw.get("value").strip() if isinstance(raw.get("value"), str) else ""
+        source_key = "pythonVariable" if node_type == "SCRIPT" else "value"
+        path = raw.get(source_key).strip() if isinstance(raw.get(source_key), str) else ""
         output_type = _normalize_output_type(raw.get("type"))
         if name:
+            if node_type == "SCRIPT":
+                if not path:
+                    path = name
             mappings.append({"name": name, "path": path, "type": output_type})
     return mappings
 
@@ -72,12 +78,69 @@ def ancestor_node_ids(
     return [node["id"] for node in nodes if node.get("id") in visited]
 
 
+def ancestor_node_distances(
+    edges: list[dict[str, Any]],
+    node_id: str,
+) -> dict[str, int]:
+    """Return the shortest upstream edge distance for every ancestor."""
+
+    incoming: dict[str, list[str]] = {}
+    for edge in edges:
+        source, target = edge.get("source"), edge.get("target")
+        if isinstance(source, str) and isinstance(target, str):
+            incoming.setdefault(target, []).append(source)
+    distances: dict[str, int] = {}
+    pending = deque((source, 1) for source in incoming.get(node_id, []))
+    while pending:
+        current, distance = pending.popleft()
+        if current == node_id:
+            continue
+        previous = distances.get(current)
+        if previous is not None and previous <= distance:
+            continue
+        distances[current] = distance
+        pending.extend(
+            (source, distance + 1) for source in incoming.get(current, [])
+        )
+    return distances
+
+
+def nearest_ancestor_output_sources(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_id: str,
+) -> dict[str, str]:
+    """Resolve each visible variable name to its unique nearest upstream node."""
+
+    distances = ancestor_node_distances(edges, node_id)
+    candidates: dict[str, list[tuple[int, str, str]]] = {}
+    for node in nodes:
+        source_id = node.get("id")
+        if not isinstance(source_id, str) or source_id not in distances:
+            continue
+        for mapping in node_output_mappings(node):
+            candidates.setdefault(mapping["name"], []).append(
+                (distances[source_id], source_id, _node_label(node))
+            )
+
+    resolved: dict[str, str] = {}
+    for name, sources in candidates.items():
+        nearest_distance = min(source[0] for source in sources)
+        nearest = [source for source in sources if source[0] == nearest_distance]
+        if len(nearest) != 1:
+            labels = " / ".join(source[2] for source in nearest)
+            raise WorkflowVariableError(
+                f"变量名等距冲突: {name} ({labels})"
+            )
+        resolved[name] = nearest[0][1]
+    return resolved
+
+
 def validate_visible_variable_names(
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     global_variables: list[dict[str, Any]],
 ) -> None:
-    global_sources: list[tuple[str, str]] = []
     seen_global: dict[str, str] = {}
     for record in global_variables:
         if not isinstance(record, dict):
@@ -88,25 +151,31 @@ def validate_visible_variable_names(
         if name in seen_global:
             raise WorkflowVariableError(f"全局变量重名: {name}")
         seen_global[name] = "全局变量"
-        global_sources.append((name, "全局变量"))
 
-    node_by_id = {node["id"]: node for node in nodes}
     for node in nodes:
         current_id = node["id"]
-        visible = list(global_sources)
-        for ancestor_id in ancestor_node_ids(nodes, edges, current_id):
-            ancestor = node_by_id[ancestor_id]
-            label = _node_label(ancestor)
-            visible.extend((mapping["name"], label) for mapping in node_output_mappings(ancestor))
         current_label = _node_label(node)
-        visible.extend((mapping["name"], current_label) for mapping in node_output_mappings(node))
-        sources: dict[str, str] = {}
-        for name, source in visible:
-            if name in sources:
+        current_names: set[str] = set()
+        for mapping in node_output_mappings(node):
+            name = mapping["name"]
+            if name in current_names:
                 raise WorkflowVariableError(
-                    f"变量名冲突: {name} ({sources[name]} / {source})"
+                    f"变量名冲突: {name} ({current_label} / {current_label})"
                 )
-            sources[name] = source
+            current_names.add(name)
+
+        ancestor_sources = nearest_ancestor_output_sources(nodes, edges, current_id)
+        for name in set(ancestor_sources) | current_names:
+            if name in seen_global:
+                source_id = ancestor_sources.get(name)
+                source_label = (
+                    _node_label(next(item for item in nodes if item["id"] == source_id))
+                    if source_id is not None
+                    else current_label
+                )
+                raise WorkflowVariableError(
+                    f"变量名冲突: {name} (全局变量 / {source_label})"
+                )
 
 
 def resolve_templates(value: Any, variables: dict[str, Any]) -> Any:
@@ -136,6 +205,23 @@ def extract_output_variables(
         extracted = extract_path_expression(context, path)
         values[mapping["name"]] = convert_output_value(
             extracted,
+            mapping["type"],
+            variable_name=mapping["name"],
+        )
+    return values
+
+
+def extract_script_output_variables(
+    node: dict[str, Any],
+    python_variables: dict[str, Any],
+) -> dict[str, Any]:
+    """Map explicitly captured Script globals to typed Workflow variables."""
+
+    values: dict[str, Any] = {}
+    for mapping in node_output_mappings(node):
+        source = mapping["path"]
+        values[mapping["name"]] = convert_output_value(
+            python_variables.get(source),
             mapping["type"],
             variable_name=mapping["name"],
         )

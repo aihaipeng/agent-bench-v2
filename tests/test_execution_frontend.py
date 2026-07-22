@@ -3,12 +3,20 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from web.app import app
+from web import routes_workflow_drafts
 
 
 STATIC_DIR = Path(__file__).parents[1] / "web" / "static"
 
 
-def test_execution_assets_and_navigation_are_registered():
+def test_execution_assets_and_navigation_are_registered(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        routes_workflow_drafts,
+        "DATABASE_PATH",
+        tmp_path / "run_storage" / "agent_bench.sqlite3",
+    )
+    monkeypatch.setattr(routes_workflow_drafts, "_repository_instance", None)
+    monkeypatch.setattr(routes_workflow_drafts, "_repository_path", None)
     index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     execution_js = (STATIC_DIR / "execution.js").read_text(encoding="utf-8")
@@ -19,8 +27,8 @@ def test_execution_assets_and_navigation_are_registered():
     assert 'data-view="runs"' not in index_html
     assert "运行中心" not in index_html
     assert '<link rel="stylesheet" href="/execution.css" />' in index_html
-    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=31" />' in index_html
-    assert '<script src="/assets/workflow-canvas.js?v=31"></script>' in index_html
+    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=33" />' in index_html
+    assert '<script src="/assets/workflow-canvas.js?v=33"></script>' in index_html
     assert '<script src="/execution.js"></script>' in index_html
     assert 'name="viewport"' not in index_html
     assert "viewTargets();" in app_js
@@ -33,6 +41,9 @@ def test_execution_assets_and_navigation_are_registered():
     assert client.get("/execution.js").status_code == 200
     assert client.get("/assets/workflow-canvas.css").status_code == 200
     assert client.get("/assets/workflow-canvas.js").status_code == 200
+    font_response = client.get("/assets/fonts/DroidSansMonoSlashed.ttf")
+    assert font_response.status_code == 200
+    assert font_response.content[:4] == b"\x00\x01\x00\x00"
     assert client.get("/execution.css").headers["cache-control"] == (
         "no-cache, no-store, must-revalidate"
     )
@@ -88,6 +99,15 @@ def test_workflow_list_uses_persistent_drafts_without_legacy_api():
     assert "id=\"workflow-search\"" in execution_js
     assert "id=\"workflow-status-filter\"" in execution_js
     assert "新增工作流" in execution_js
+    assert "function openWorkflowCreateDialog()" in execution_js
+    assert 'id="workflow-create-name"' in execution_js
+    assert 'id="workflow-create-description"' in execution_js
+    assert "名称不能为空" in execution_js
+    assert "await openWorkflowEditor(null, {name: name, description: description})" in execution_js
+    assert "createOnMount: !workflowId" in execution_js
+    assert "onPersistMetadata: async function (metadata)" in execution_js
+    assert "API.patch(" in execution_js
+    assert "'/metadata'" in execution_js
     assert "window.AgentBenchWorkflowCanvas.mount" in execution_js
     assert ".workflow-row-actions" in execution_css
     assert ".workflow-valid" in execution_css
@@ -102,11 +122,10 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     canvas_css = (
         STATIC_DIR.parent / "frontend" / "workflow-canvas.css"
     ).read_text(encoding="utf-8")
-
-    assert "function openWorkflowEditor(workflowId)" in execution_js
+    assert "function openWorkflowEditor(workflowId, initialMetadata)" in execution_js
     assert "window.AgentBenchWorkflowCanvas.mount" in execution_js
     assert "API.get('/api/tools')" not in execution_js[
-        execution_js.index("async function openWorkflowEditor(workflowId)"):
+        execution_js.index("async function openWorkflowEditor(workflowId, initialMetadata)"):
     ]
     for token in (
         "ReactFlow",
@@ -131,6 +150,9 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "event.key === 'Delete'" in canvas_jsx
     assert "event.key === 'Backspace'" in canvas_jsx
     assert "copyNodes(selectedIds)" in canvas_jsx
+    assert "function hasBrowserTextSelection()" in canvas_jsx
+    assert "control && key === 'c' && hasBrowserTextSelection()" in canvas_jsx
+    assert "if (hasBrowserTextSelection()) return" in canvas_jsx
     assert "pasteClipboard()" in canvas_jsx
     assert "const handleNodeClick" in canvas_jsx
     assert 'tabIndex={0}' in canvas_jsx
@@ -149,6 +171,26 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert 'title="回退"' in canvas_jsx
     assert 'title="前进"' in canvas_jsx
     assert "全局变量" in canvas_jsx
+    assert "const [nameEditing, setNameEditing]" in canvas_jsx
+    assert "const [descriptionEditing, setDescriptionEditing]" in canvas_jsx
+    assert "const persistMetadata = useCallback" in canvas_jsx
+    assert "options.onPersistMetadata" in canvas_jsx
+    assert "options.createOnMount" in canvas_jsx
+    assert 'onDoubleClick={() => setNameEditing(true)}' in canvas_jsx
+    assert 'onBlur={commitWorkflowName}' in canvas_jsx
+    assert "if (event.key === 'Enter') event.currentTarget.blur()" in canvas_jsx
+    assert 'onDoubleClick={() => setDescriptionEditing(true)}' in canvas_jsx
+    assert 'onBlur={commitWorkflowDescription}' in canvas_jsx
+    assert 'aria-label="工作流说明"' in canvas_jsx
+    assert "添加工作流说明" in canvas_jsx
+    assert 'title="双击修改工作流名称"' not in canvas_jsx
+    assert ".wf-header-description" in canvas_css
+    assert ".wf-description-editor" in canvas_css
+    assert "color-scheme: light" in canvas_css
+    assert "background: #f6f8fb" in canvas_css
+    assert "background: #fff" in canvas_css
+    assert "color: #172033" in canvas_css
+    assert "grid-template-columns: minmax(330px, 1fr) minmax(260px, 500px) minmax(430px, 1fr)" in canvas_css
     assert "wf-inspector-footer" not in canvas_jsx
     assert "重试次数" in canvas_jsx
     assert "输出变量" in canvas_jsx
@@ -159,7 +201,11 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "const removeOutputVariable = (id)" in canvas_jsx
     assert 'aria-label={`输出变量名 ${index + 1}`}' in canvas_jsx
     assert "const OUTPUT_VARIABLE_TYPES = ['AUTO', 'STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'OBJECT', 'ARRAY']" in canvas_jsx
-    assert "return {id: rowId(), name: '', type: 'AUTO', value: ''}" in canvas_jsx
+    assert "return {id: rowId(), name: '', type: 'AUTO', value: '', pythonVariable: ''}" in canvas_jsx
+    assert "Python 顶层变量" in canvas_jsx
+    assert "pythonVariable: event.target.value" in canvas_jsx
+    assert "type === 'SCRIPT' && Array.isArray(storedData.outputVariables)" in canvas_jsx
+    assert "{...row, pythonVariable: row.name, value: ''}" in canvas_jsx
     assert 'aria-label={`输出变量类型 ${index + 1}`}' in canvas_jsx
     assert "value={row.type || 'AUTO'}" in canvas_jsx
     assert 'aria-label={`输出变量 ${index + 1}`}' in canvas_jsx
@@ -179,7 +225,7 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "Workflow 存在循环依赖" in canvas_jsx
     assert "const orphaned = nodes.length === 1 ? []" in canvas_jsx
     assert canvas_jsx.count("validateWorkflowGraph(nodes, edges)") >= 3
-    assert "const persistDraft = useCallback(async ({forNodeRun = false} = {})" in canvas_jsx
+    assert "const persistDraft = useCallback(async ({forNodeRun = false, metadata = null} = {})" in canvas_jsx
     assert "const activeWorkflowId = await persistDraft({forNodeRun: true})" in canvas_jsx
     assert "if (!forNodeRun)" in canvas_jsx
     assert "draft.forNodeRun ? '?for_node_run=true' : ''" in execution_js
@@ -205,7 +251,7 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "setEditorInitialTab" not in canvas_jsx
     assert "setTab(initialTab)" in canvas_jsx
     assert "const isScript = node.data.nodeType === 'SCRIPT'" in canvas_jsx
-    assert "const showParametersTab = !isLlm && !isScript" in canvas_jsx
+    assert "const showParametersTab = !isHttp && !isLlm && !isScript" in canvas_jsx
     assert "showParametersTab && <button type=\"button\" className={tab === 'parameters'" in canvas_jsx
     assert "tab === 'parameters' && showParametersTab" in canvas_jsx
     assert 'role="columnheader">source' in canvas_jsx
@@ -235,7 +281,7 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert ".wf-mapping-value-row" in canvas_css
     assert ".wf-output-variable-row" in canvas_css
     assert ".wf-output-variable-list" in canvas_css
-    assert "grid-template-columns: minmax(170px, 0.8fr) minmax(150px, 0.65fr) minmax(260px, 1.4fr) 32px" in canvas_css
+    assert "grid-template-columns: minmax(190px, 0.9fr) minmax(260px, 1.35fr) minmax(150px, 0.65fr) 32px" in canvas_css
     assert "grid-template-columns: 64px minmax(0, 1fr)" in canvas_css
     assert "white-space: nowrap" in canvas_css
     assert "@media" not in canvas_css
@@ -286,6 +332,7 @@ def test_http_node_editor_has_api_import_and_body_controls():
     ).read_text(encoding="utf-8")
 
     assert "type === 'HTTP' ? {httpConfig: defaultHttpConfig()}" in canvas_jsx
+    assert "headers: [emptyKeyValueRow('Content-Type', 'application/json')]" in canvas_jsx
     assert "function parseCurlRequest(command)" in canvas_jsx
     assert "parseCurl(normalized)" in canvas_jsx
     assert "splitShellWords(source)" in canvas_jsx
@@ -311,6 +358,76 @@ def test_http_node_editor_has_api_import_and_body_controls():
     assert ".wf-http-body-types" in canvas_css
     assert ".wf-http-code-toolbar" in canvas_css
     assert ".wf-http-code-editor" in canvas_css
+    assert "const showCodeEditor = meta.executable && !isHttp && !isLlm" in canvas_jsx
+    assert "const showParametersTab = !isHttp && !isLlm && !isScript" in canvas_jsx
+    assert "{showCodeTab && <button" not in canvas_jsx
+    assert "nodeType === 'HTTP' ? (" in canvas_jsx
+    assert "function HttpLogSection({title, text})" in canvas_jsx
+    assert '<HttpLogCopyButton text={text} label={`复制${title}`} />' in canvas_jsx
+    assert 'pre aria-label={`${title}内容`}' in canvas_jsx
+    assert "function HttpRequestLogSection({request})" in canvas_jsx
+    assert "function rawHttpRequest(request)" in canvas_jsx
+    assert "`${method} ${rawHttpRequestUrl(request)} HTTP/1.1`" in canvas_jsx
+    assert "return [requestLine, ...headers, '', rawHttpRequestBody(request)].join('\\n')" in canvas_jsx
+    assert 'return <HttpLogSection title="request" text={rawText} />' in canvas_jsx
+    assert "<HttpRequestLogSection request={run.request_body} />" in canvas_jsx
+    assert canvas_jsx.count('title="response" text={run.response_body}') == 2
+    assert '<HttpLogSection title="request" text={requestContent} />' in canvas_jsx
+    assert "复制字段路径" not in canvas_jsx
+    assert "复制字段值" not in canvas_jsx
+    for selector in (
+        ".wf-http-log-section > header",
+        ".wf-http-log-copy",
+        ".wf-http-log-section > pre",
+    ):
+        assert selector in canvas_css
+    assert "wf-http-postman" not in canvas_jsx
+    assert "wf-http-postman" not in canvas_css
+    assert "-webkit-user-select: text" in canvas_css
+    assert "user-select: text" in canvas_css
+    assert ".wf-http-log-section > pre::selection" in canvas_css
+    http_log_title_rule = canvas_css[
+        canvas_css.index(".wf-http-log-section > header > strong"):
+        canvas_css.index(".wf-http-log-copy")
+    ]
+    assert "font-size: 14px" in http_log_title_rule
+    assert "font-weight: 700" in http_log_title_rule
+    raw_log_start = canvas_css.index(".wf-llm-run-detail > section > pre")
+    raw_log_rule = canvas_css[raw_log_start:canvas_css.index("}", raw_log_start)]
+    assert "font-size: var(--wf-raw-log-font-size)" in raw_log_rule
+    http_log_branch = canvas_jsx[
+        canvas_jsx.index("{nodeType === 'HTTP' ? ("):
+        canvas_jsx.index(") : nodeType === 'SCRIPT' ? (")
+    ]
+    for excluded in ("wf-llm-run-meta", "run.stdout", "run.stderr", "tracebackContent"):
+        assert excluded not in http_log_branch
+
+
+def test_node_setting_section_headings_use_theme_contrast():
+    canvas_css = (
+        STATIC_DIR.parent / "frontend" / "workflow-canvas.css"
+    ).read_text(encoding="utf-8")
+
+    inspector_start = canvas_css.index(".wf-inspector {")
+    inspector_block = canvas_css[inspector_start:canvas_css.index("}", inspector_start)]
+    assert "--wf-heading: #111827" in inspector_block
+    assert canvas_css.count("--wf-heading:") == 1
+    for selector in (
+        ".wf-inspector-body label > span",
+        ".wf-llm-section-title",
+        ".wf-llm-stream-field > span",
+        ".wf-llm-advanced > button",
+        ".wf-http-api-row > strong,",
+        ".wf-http-collapse-button",
+        ".wf-http-kv-heading > span,",
+        ".wf-config-title",
+        ".wf-config-section > button",
+        ".wf-output-variable-row label > span",
+    ):
+        rule = canvas_css[
+            canvas_css.index(selector):canvas_css.index("}", canvas_css.index(selector))
+        ]
+        assert "color: var(--wf-heading)" in rule
 
 
 def test_canvas_defines_tool_nodes_only_inside_workflow():
@@ -320,10 +437,77 @@ def test_canvas_defines_tool_nodes_only_inside_workflow():
     canvas_css = (
         STATIC_DIR.parent / "frontend" / "workflow-canvas.css"
     ).read_text(encoding="utf-8")
+    build_script = (
+        STATIC_DIR.parents[1] / "scripts" / "build-workflow.mjs"
+    ).read_text(encoding="utf-8")
 
-    assert "const DEFAULT_MAIN_PY = 'response = inputs'" in canvas_jsx
-    assert "value={node.data.mainPy ?? DEFAULT_MAIN_PY}" in canvas_jsx
-    assert "onChange={(event) => onChange({mainPy: event.target.value})}" in canvas_jsx
+    assert "const DEFAULT_AGENT_MAIN_PY = 'response = inputs'" in canvas_jsx
+    assert "const DEFAULT_SCRIPT_MAIN_PY = 'msg = \"介绍一下自己\"\\nprint(msg)'" in canvas_jsx
+    assert "function PythonCodeEditor({value, onChange})" in canvas_jsx
+    assert 'font-family: "Droid Sans Mono Slashed"' in canvas_css
+    assert 'src: url("/assets/fonts/DroidSansMonoSlashed.ttf") format("truetype")' in canvas_css
+    assert 'external: ["/assets/*"]' in build_script
+    assert "font-family: Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif" in canvas_css
+    editor_start = canvas_css.index(".wf-python-editor .cm-editor {")
+    editor_block = canvas_css[editor_start:canvas_css.index("}", editor_start)]
+    assert 'font-family: Consolas, "SFMono-Regular", monospace' in editor_block
+    assert "Droid Sans Mono Slashed" not in editor_block
+    assert "font-family: var(--wf-font-family) !important" not in canvas_css
+    assert "font-size: 16px" in canvas_css
+    assert "--wf-heading: #111827" in canvas_css
+    assert "grid-template-rows: auto 540px" in canvas_css
+    assert "height: 540px" in canvas_css
+    for title_selector in (
+        ".wf-inspector header strong",
+        ".wf-inspector-tabs button",
+        ".wf-inspector-body label > span",
+        ".wf-llm-section-title",
+        ".wf-http-api-row > strong",
+        ".wf-config-title",
+    ):
+        start = canvas_css.index(title_selector)
+        title_block = canvas_css[start:canvas_css.index("}", start)]
+        assert "color: var(--wf-heading)" in title_block
+    inspector_start = canvas_css.index(".wf-inspector {")
+    inspector_block = canvas_css[inspector_start:canvas_css.index("}", inspector_start)]
+    for declaration in (
+        '--wf-raw-log-background: #000000',
+        '--wf-raw-log-color: #e3e8ef',
+        '--wf-raw-log-font-family: Consolas, "SFMono-Regular", monospace',
+        '--wf-raw-log-font-size: 14.3px',
+        '--wf-raw-log-line-height: 1.6',
+    ):
+        assert declaration in inspector_block
+    for log_selector in (
+        ".wf-llm-run-detail > section > pre {",
+        "textarea.wf-script-console {",
+    ):
+        start = canvas_css.index(log_selector)
+        log_block = canvas_css[start:canvas_css.index("}", start)]
+        assert "background: var(--wf-raw-log-background)" in log_block
+        assert "color: var(--wf-raw-log-color)" in log_block
+        assert "font-family: var(--wf-raw-log-font-family)" in log_block
+        assert "font-size: var(--wf-raw-log-font-size)" in log_block
+        assert "line-height: var(--wf-raw-log-line-height)" in log_block
+    assert "grid-template-columns: 18px 130px 66px 80px minmax(0, 1fr)" in canvas_css
+    run_summary_typography = canvas_css[
+        canvas_css.index(".wf-llm-run-summary time,"):
+        canvas_css.index(".wf-llm-run-summary strong")
+    ]
+    assert "font-size: 14px" in run_summary_typography
+    result_start = canvas_css.index(".wf-llm-run-result {")
+    result_block = canvas_css[result_start:canvas_css.index("}", result_start)]
+    assert "font-size: 14px" in result_block
+    assert "text-overflow: ellipsis" in result_block
+    assert "white-space: nowrap" in result_block
+    assert "python()" in canvas_jsx
+    assert "oneDark" in canvas_jsx
+    assert "EditorView.updateListener.of" in canvas_jsx
+    assert "value={node.data.mainPy ?? (isScript ? DEFAULT_SCRIPT_MAIN_PY : DEFAULT_AGENT_MAIN_PY)}" in canvas_jsx
+    assert "wf-embedded-code-editor wf-editor-full-row" in canvas_jsx
+    assert canvas_jsx.index("wf-embedded-code-editor wf-editor-full-row") < canvas_jsx.index("wf-config-section wf-editor-full-row")
+    assert ".wf-python-editor .cm-editor" in canvas_css
+    assert "onChange={(mainPy) => onChange({mainPy})}" in canvas_jsx
     assert "makeNode(type, position)" in canvas_jsx
     assert "type === 'HTTP' ? {httpConfig: defaultHttpConfig()}" in canvas_jsx
     for removed in (
@@ -360,6 +544,32 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "onSelect(provider.id, model)" in canvas_jsx
     assert "模型已失效" in canvas_jsx
     assert 'aria-label="模型高级参数 JSON"' in canvas_jsx
+    assert "const LLM_PARAMETERS_REFERENCE = JSON.stringify({" in canvas_jsx
+    assert "thinking: {type: 'disabled'}" in canvas_jsx
+    assert "response_format: {type: 'json_object'}" in canvas_jsx
+    assert "placeholder={LLM_PARAMETERS_REFERENCE}" in canvas_jsx
+    assert "function modelParametersEditorText(parameters)" in canvas_jsx
+    assert "if (!text.trim())" in canvas_jsx
+    assert "const beautifyModelParameters = () =>" in canvas_jsx
+    assert 'aria-label="格式化模型高级参数 JSON"' in canvas_jsx
+    assert ".wf-llm-json-toolbar" in canvas_css
+    assert ".wf-llm-json-editor > textarea::placeholder" in canvas_css
+    llm_json_editor_start = canvas_css.index(".wf-llm-json-editor {")
+    llm_json_editor_rule = canvas_css[
+        llm_json_editor_start:canvas_css.index("}", llm_json_editor_start)
+    ]
+    assert "min-height: 314px" in llm_json_editor_rule
+    assert "grid-template-rows: 34px minmax(280px, 1fr)" in llm_json_editor_rule
+    llm_json_textarea_start = canvas_css.index(".wf-llm-json-editor > textarea {")
+    llm_json_textarea_rule = canvas_css[
+        llm_json_textarea_start:canvas_css.index("}", llm_json_textarea_start)
+    ]
+    assert "min-height: 280px" in llm_json_textarea_rule
+    llm_placeholder_rule = canvas_css[
+        canvas_css.index(".wf-llm-json-editor > textarea::placeholder"):
+        canvas_css.index("}", canvas_css.index(".wf-llm-json-editor > textarea::placeholder"))
+    ]
+    assert "font-style: italic" in llm_placeholder_rule
     assert 'aria-label="系统提示词"' in canvas_jsx
     assert 'aria-label="用户提示词"' in canvas_jsx
     assert 'aria-label="插入提示词变量"' not in canvas_jsx
@@ -368,17 +578,43 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "delete parsed.stream" in canvas_jsx
     assert "onChange({modelParameters: parsed})" in canvas_jsx
     assert "请选择有效模型、填写用户提示词并修正高级参数" in canvas_jsx
-    assert "meta.executable && !isLlm" in canvas_jsx
-    assert "!isLlm && <button" in canvas_jsx
+    assert "const showCodeEditor = meta.executable && !isHttp && !isLlm" in canvas_jsx
+    assert "{showCodeTab && <button" not in canvas_jsx
     assert "<NodeRunHistory runs={node.data.runHistory || []} nodeType={node.data.nodeType} />" in canvas_jsx
     assert ".slice(0, 10)" in canvas_jsx
     assert "formatRunDate(run.finished_at || run.started_at)" in canvas_jsx
-    assert "原始响应" in canvas_jsx
+    assert "function formatRunTokenUsage(run)" in canvas_jsx
+    assert "function streamingUsageFromResponse(responseBody)" in canvas_jsx
+    assert "streamingUsageFromResponse(run?.response_body) || {}" in canvas_jsx
+    assert "if (isPlainObject(payload.message)) candidates.push(payload.message.usage)" in canvas_jsx
+    assert "normalizeTokenCount(usage.total_tokens)" in canvas_jsx
+    assert "normalizeTokenCount(usage.prompt_tokens)" in canvas_jsx
+    assert "normalizeTokenCount(usage.completion_tokens)" in canvas_jsx
+    assert "normalizeTokenCount(usage.input_tokens)" in canvas_jsx
+    assert "normalizeTokenCount(usage.output_tokens)" in canvas_jsx
+    assert "nodeType === 'LLM' && <span className=\"wf-llm-run-token\"" in canvas_jsx
+    assert "formatRunTokenUsage(run)" in canvas_jsx
+    assert '<HttpLogSection title="response" text={run.response_body} />' in canvas_jsx
     assert "原始 stderr" in canvas_jsx
+    assert "Script 原始控制台" in canvas_jsx
+    assert '<textarea\n                                            className="wf-script-console"' in canvas_jsx
+    assert "readOnly\n                                            value={scriptConsole}" in canvas_jsx
+    assert "const scriptConsole" in canvas_jsx
+    assert "run.console" in canvas_jsx
+    assert "wf-script-console" in canvas_css
+    assert "copyConsole(event, run.id, scriptConsole)" in canvas_jsx
+    assert "控制台已复制" in canvas_jsx
+    assert "复制控制台" in canvas_jsx
+    assert "event.clipboardData.setData('text/plain', text)" in canvas_jsx
+    assert "event.stopImmediatePropagation()" in canvas_jsx
+    assert "fetch('/api/local/clipboard'" in canvas_jsx
+    assert canvas_jsx.index("fetch('/api/local/clipboard'") < canvas_jsx.index("navigator.clipboard?.writeText")
+    assert ".wf-script-console-copy" in canvas_css
+    assert "user-select: text" in canvas_css
     assert "run.response_body" in canvas_jsx
-    assert "原始请求" in canvas_jsx
+    assert '<HttpLogSection title="request" text={requestContent} />' in canvas_jsx
     assert "原始 stdout" in canvas_jsx
-    assert "原始 response" in canvas_jsx
+    assert "原始 response" not in canvas_jsx
     assert "原始 stderr" in canvas_jsx
     assert "错误 traceback" in canvas_jsx
     assert "输入快照" not in canvas_jsx
@@ -401,7 +637,8 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert "disabled={!variable.available}" in canvas_jsx
     assert "全局变量" in canvas_jsx
     assert "/variables`" in canvas_jsx
-    assert "persistDraft()" in canvas_jsx
+    assert "const activeWorkflowId = await persistDraft({forNodeRun: true});" in canvas_jsx
+    assert "const activeWorkflowId = await persistDraft();" not in canvas_jsx
     assert "/api/workflow-drafts/${encodeURIComponent(activeWorkflowId)}/nodes/${encodeURIComponent(id)}/runs" in canvas_jsx
     assert "['HTTP', 'AGENT', 'LLM', 'SCRIPT'].includes(targetNode?.data.nodeType)" in canvas_jsx
     assert "apiKey" not in canvas_jsx
@@ -411,12 +648,22 @@ def test_llm_node_uses_saved_models_and_framework_independent_parameters():
     assert ".wf-model-provider-group" in canvas_css
     assert ".wf-model-option.is-selected" in canvas_css
     assert ".wf-llm-prompt-field" in canvas_css
-    assert ".wf-llm-stream-switch" in canvas_css
+    assert ".wf-inspector-body .wf-llm-stream-switch" in canvas_css
+    assert "width: 34px" in canvas_css
+    assert "height: 19px" in canvas_css
+    assert "grid-template-columns: none" in canvas_css
+    assert "className=\"wf-llm-model-row\"" in canvas_jsx
+    assert ".wf-llm-model-row" in canvas_css
+    assert "grid-template-columns: minmax(0, 1fr) max-content" in canvas_css
+    assert "grid-template-columns: max-content 34px" in canvas_css
     assert ".wf-llm-stream-field > span" in canvas_css
     assert "min-height: 19px" in canvas_css
     assert "font-weight: 700" in canvas_css
     assert ".wf-llm-stream-control" not in canvas_css
     assert ".wf-llm-run-summary" in canvas_css
+    assert ".wf-llm-run-summary.has-token-usage" in canvas_css
+    assert "grid-template-columns: 18px 130px 66px 80px 112px minmax(0, 1fr)" in canvas_css
+    assert ".wf-llm-run-token" in canvas_css
     assert ".wf-llm-run-detail" in canvas_css
     assert ".wf-node-variable-panel" in canvas_css
     assert ".wf-node-variable-row button" in canvas_css

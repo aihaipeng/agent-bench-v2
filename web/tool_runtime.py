@@ -161,12 +161,14 @@ def stream_tool_worker(
     normalized_payload = _json_clone(payload, "Worker payload")
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
+    console_parts: list[str] = []
 
     def with_streams(result: dict[str, Any]) -> dict[str, Any]:
         return {
             **result,
             "stdout": "".join(stdout_parts),
             "stderr": "".join(stderr_parts),
+            "console": "".join(console_parts),
         }
 
     state = _prepare_execution(run_id)
@@ -229,6 +231,7 @@ def stream_tool_worker(
             if remaining <= 0:
                 message = f"执行超时，已终止子进程（{timeout_seconds:g} 秒）\n"
                 stderr_parts.append(message)
+                console_parts.append(message)
                 on_log(message)
                 _terminate_process_tree(process)
                 process.wait(timeout=5)
@@ -243,6 +246,7 @@ def stream_tool_worker(
             if source == "stderr":
                 text = raw_line.decode("utf-8", errors="replace")
                 stderr_parts.append(text)
+                console_parts.append(text)
                 on_log(text)
                 continue
             for event in _parse_worker_line(raw_line):
@@ -250,6 +254,7 @@ def stream_tool_worker(
                     text = str(event.get("text", ""))
                     stream = event.get("stream", "stdout")
                     (stderr_parts if stream == "stderr" else stdout_parts).append(text)
+                    console_parts.append(text)
                     on_log(text)
                 elif event.get("type") == "result" and isinstance(event.get("result"), dict):
                     result = event["result"]
@@ -261,6 +266,7 @@ def stream_tool_worker(
         if result is None:
             message = "Worker 未返回执行结果\n"
             stderr_parts.append(message)
+            console_parts.append(message)
             on_log(message)
             return with_streams({"ok": False})
         return with_streams(result)

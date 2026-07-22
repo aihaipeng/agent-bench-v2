@@ -32,12 +32,24 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             }
         )
         if body.get("stream") is True and self.__class__.response_status == 200:
-            payload = (
-                'data: {"choices":[{"delta":{"content":"stream "}}]}\n\n'
-                'data: {"choices":[{"delta":{"content":"output"},"finish_reason":"stop"}],'
-                '"usage":{"total_tokens":17}}\n\n'
-                "data: [DONE]\n\n"
-            ).encode()
+            if self.path.endswith("/messages"):
+                payload = (
+                    'event: message_start\n'
+                    'data: {"type":"message_start","message":{"usage":{"input_tokens":11,'
+                    '"output_tokens":1}}}\n\n'
+                    'event: content_block_delta\n'
+                    'data: {"type":"content_block_delta","delta":{"type":"text_delta",'
+                    '"text":"stream output"}}\n\n'
+                    'event: message_delta\n'
+                    'data: {"type":"message_delta","usage":{"output_tokens":6}}\n\n'
+                ).encode()
+            else:
+                payload = (
+                    'data: {"choices":[{"delta":{"content":"stream "}}]}\n\n'
+                    'data: {"choices":[{"delta":{"content":"output"},"finish_reason":"stop"}],'
+                    '"usage":{"total_tokens":17}}\n\n'
+                    "data: [DONE]\n\n"
+                ).encode()
             content_type = "text/event-stream"
         else:
             payload = json.dumps(self.__class__.response_body).encode()
@@ -499,10 +511,12 @@ def test_llm_node_stream_endpoint_emits_raw_chunks_and_persists_final_run(
     assert final["status"] == "SUCCESS"
     assert final["output"] == raw
     assert final["response_body"] == raw
-    assert final["usage"] is None
+    assert final["usage"] == {"total_tokens": 17}
     assert final["request_body"]["stream"] is True
+    assert final["request_body"]["stream_options"] == {"include_usage": True}
     assert final["output_variables"] == {}
-    assert any("未执行解析" in event["message"] for event in final["events"])
+    assert any("已提取 token usage" in event["message"] for event in final["events"])
+    assert any("未执行输出解析" in event["message"] for event in final["events"])
 
 
 def test_anthropic_stream_uses_native_endpoint_and_keeps_raw_sse(tmp_path, monkeypatch):
@@ -539,7 +553,7 @@ def test_anthropic_stream_uses_native_endpoint_and_keeps_raw_sse(tmp_path, monke
     assert final["status"] == "SUCCESS"
     assert final["response_body"] == raw
     assert final["output_variables"] == {}
-    assert final["usage"] is None
+    assert final["usage"] == {"input_tokens": 11, "output_tokens": 6}
     assert _GatewayHandler.requests[0]["path"] == "/v1/messages"
     assert _GatewayHandler.requests[0]["authorization"] is None
     assert _GatewayHandler.requests[0]["x_api_key"] == "secret-never-return"

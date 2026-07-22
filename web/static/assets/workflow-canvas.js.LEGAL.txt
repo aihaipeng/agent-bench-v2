@@ -98,6 +98,7 @@ lucide-react/dist/esm/icons/copy.js:
 lucide-react/dist/esm/icons/earth.js:
 lucide-react/dist/esm/icons/external-link.js:
 lucide-react/dist/esm/icons/eye.js:
+lucide-react/dist/esm/icons/file-text.js:
 lucide-react/dist/esm/icons/layout-grid.js:
 lucide-react/dist/esm/icons/loader-circle.js:
 lucide-react/dist/esm/icons/play.js:

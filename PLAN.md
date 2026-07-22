@@ -1,12 +1,372 @@
 # Workflow Studio 节点内聚与执行协议计划（T13.2）
 
+## T13.11 Workflow 创建元数据与顶部说明（已完成）
+
+### 业务背景与目标
+
+- Workflow 作者需要在进入画布前明确名称和整体说明，并在编排过程中持续看到这两项元数据。
+- 说明只描述整个 Workflow，不承担画布分区注释职责，因此不引入说明节点、连线、复制粘贴或 DAG 特例。
+
+### 已确认边界
+
+- 点击“新增工作流”先打开名称/说明弹窗；名称必填且最长 120 字符，说明可空且最长 2000 字符。
+- 画布顶部左侧显示名称，中间显示单行说明摘要，右侧保留运行、全局变量、中断和保存操作。
+- 名称和说明均为展示态，双击后进入编辑；名称使用单行输入，说明使用轻量多行浮层。
+- 名称按 Enter 或失焦、说明失焦时，通过独立元数据接口立即持久化；该接口不接收或改写节点、连线和全局变量，也不触发完整 DAG 校验。
+- 暗色主题下 Workflow 顶栏仍固定使用浅色控件；名称悬停和说明编辑器不得继承全局深色输入背景，也不显示原生黑色提示框。
+
+### 验收与验证（2026-07-23）
+
+- API 专项覆盖名称/说明规范化、空名称拒绝、缺失 Workflow、图数据保持不变，以及不完整图仍可独立更新元数据。
+- 浏览器 E2E 覆盖新增弹窗、名称必填、创建后自动落库、名称双击编辑、说明双击编辑、失焦保存及刷新后列表回读；临时 Workflow 已删除。
+- 暗色主题真实页面计算样式：说明编辑器与 textarea 背景均为 `rgb(255, 255, 255)`，文字为 `rgb(23, 32, 51)`，`color-scheme` 为 `light`；名称悬停不再出现黑色背景或原生黑色提示框。
+- 浏览器控制台错误和警告均为 0；前端构建、Python 编译、JavaScript 语法检查和 `git diff --check` 均通过；受影响回归为 `102 passed, 1 warning`，全量回归为 `222 passed, 6 skipped, 1 warning`。
+
 > 状态：T13.1 前端高保真原型和回归已完成；T13.2 Step 11 已完成验收并推送到 GitHub。按最新业务决策，工具管理/工具模板体系及所有画布耦合已彻底删除，工具节点完全在 Workflow 中定义；LLM 节点已接入模型管理引用、任意 JSON 高级参数和框架无关的 OpenAI-compatible 网关内核。新版 Workflow 持久化与 DAG 真实执行 API 仍尚待单独确认和实现。
 >
-> 更新时间：2026-07-20
+> 更新时间：2026-07-23
 >
 > 范围：新版全屏 Workflow Studio 和新的工具模板体系。旧固定 Workflow、旧 Run 页面/API/执行链以及当前 Script / Agent 工具协议将被删除，不提供兼容迁移。
 >
 > 事实来源优先级：用户最新确认 > 本计划的“已确认决策” > `docs/enterprise-agent-test-orchestration.md` 中的既有规则。未列为“已确认”的内容不得直接实现。
+
+## T13.10 LLM 日志 Token 与模型行布局（已完成）
+
+### 业务背景与目标
+
+- Workflow 作者需要在不展开日志详情的情况下比较单次 LLM 调用成本，同时快速扫描时间、状态、耗时和最终结果概览。
+- LLM 设置页需要把模型选择与流式开关放在同一视觉层级，减少纵向占用并明确流式模式属于当前模型调用配置。
+
+### 已确认边界
+
+- 仅 LLM 日志摘要行新增 Token 列，顺序固定为“时间 / 状态 / 耗时 / Token / 概览”；HTTP、AGENT、SCRIPT 保持原五列布局。
+- Token 优先读取 `usage.total_tokens`；缺失时依次兼容 OpenAI 的 `prompt_tokens + completion_tokens` 和 Anthropic 的 `input_tokens + output_tokens`。无 usage、失败、中断以及不解析 usage 的流式响应统一显示 `-- tokens`。
+- Token 列固定为 `112px`，概览继续使用剩余宽度并在过长时省略，动态内容不得推动时间、状态和耗时列。
+- LLM 设置页使用同一行两列布局：左侧为模型字段，右侧为“流式输出 + 开关”；开关固定 `34x19`，系统提示词从下一行开始。流式执行、usage 持久化和输出变量规则不变。
+
+### 验收与验证（2026-07-23）
+
+- 真实持久化日志：复用本机 Workflow“HTTP GET 9000 验证”的 DeepSeek LLM 记录，4 条摘要依次显示 `-- tokens / 166 tokens / -- tokens / 162 tokens`，未发起新的供应商调用，也未保存或修改 Workflow。
+- 日志布局：真实成功行计算网格为 `18px 130px 66px 80px 112px 562px`；Token 位于耗时和概览之间，日志面板及页面横向溢出均为 0，浏览器控制台错误为 0。
+- 设置布局：1440x900 下模型选择器和流式开关处于同一行，间距 `24px`；开关为 `34x19`，两者垂直中心偏差为 0，设置面板和页面横向溢出均为 0。
+- 构建与回归：`npm run build`、Python `compileall`、Workflow bundle `node --check` 和 `git diff --check` 均通过；`uv run pytest tests/test_execution_frontend.py tests/test_llm_node_runs.py tests/test_model_gateway.py -q` 结果 `25 passed, 1 warning`；全量 `uv run pytest -q` 结果 `221 passed, 6 skipped, 1 warning`。6 项跳过为未注入真实供应商环境变量的 live 用例，warning 为既有 Starlette/httpx 弃用提示。
+
+## T13.6 HTTP 节点界面与日志收敛（已完成）
+
+### 业务目标与场景
+
+- Workflow 编排人员通过系统 HTTP 执行器配置并运行标准请求，不需要在 HTTP 节点中查看或维护 Python 代码。
+- HTTP 节点用于对接 FastAPI 或真实企业 Agent 环境；排查调用问题时只关注实际发出的请求和收到的响应，不在日志详情中混入执行器 stdout、stderr、traceback 或其他运行元信息。
+
+### 已确认边界
+
+- HTTP 节点配置页只保留“设置 / 日志”两个页签，删除 HTTP 的“代码 / 参数”页签；AGENT、LLM、SCRIPT 的页签规则不受影响。
+- “设置”继续承载 Method、URL、Headers、Params、Body、运行配置和输出变量；本次不删除 HTTP 请求本身的 Query Params，也不改变输出变量提取协议。
+- 日志列表摘要继续显示状态、运行时间和耗时；展开详情只显示“原始请求 / 原始响应”。底层运行记录和变量提取所需数据继续持久化，不因界面收敛而丢失。
+- 原始请求和原始响应保持原有深色原始文本块样式，每个模块标题右侧各提供一个整段复制按钮；不拆成 JSON 字段表，也不提供逐字段复制按钮。
+- 原始日志文本显式允许鼠标选中。存在浏览器文本选区时，原生 `Ctrl+C` 优先于画布节点复制；没有文本选区时继续执行既有节点复制。
+- HTTP 原始请求采用 Postman 式可读布局，分为请求行、Headers、Params 和 Body。RAW Body 是合法 JSON 字符串时解析并缩进显示，不再把 JSON 作为字符串二次转义；非 JSON Body 保持原文。
+- “复制原始请求”复制 Postman 式格式化文本，而不是持久化层的 JSON 包装文本；实际发出的请求、持久化记录和输出变量提取仍使用原始结构，不受展示格式影响。
+- HTTP 仍由标准 HTTP 执行器执行，不支持或恢复 HTTP Python 代码模式。
+- 新建 HTTP 节点的 Headers 默认包含可编辑、可删除的 `Content-Type: application/json`。该默认值只在创建节点时写入；已有节点、cURL 导入结果和用户手工删除后保存的空 Headers 均不自动补回。
+
+### 子任务与验证
+
+1. **HTTP 编辑器页签收敛**（已完成，2026-07-22）
+   - 输出：HTTP 只显示“设置 / 日志”。
+   - 验证结果：`uv run pytest tests/test_execution_frontend.py -q` -> `8 passed, 1 warning`。
+2. **HTTP 日志详情收敛**（已完成，2026-07-22）
+   - 输出：HTTP 展开详情只渲染原始请求和原始响应。
+   - 验证结果：`uv run pytest tests/test_execution_frontend.py tests/test_workflow_node_runs.py -q` -> `18 passed, 1 warning`；成功、非 2xx 和配置失败的既有执行记录行为均通过。
+3. **真实 GET 端到端验收**（已完成，2026-07-22）
+   - 在桌面画布保存并运行 `GET http://127.0.0.1:9000/chat/1`，节点状态为 `SUCCESS`，响应 HTTP 200，返回订单 `ORD-20260722-0001`。
+   - 展开日志确认页签仅为“设置 / 日志”，详情标题恰好为“原始请求 / 原始响应”，请求 Method 和 URL 正确；页面横向溢出为 0，浏览器控制台错误为 0。
+   - 验收 Workflow 名称为“HTTP GET 9000 验证”，保留在本机数据库供人工查看。
+4. **完整回归**（已完成，2026-07-22）
+   - `npm run build`、`uv run python -m compileall -q execution web tests` 和 `git diff --check` 均成功。
+   - `uv run pytest -q` -> `219 passed, 6 skipped, 1 warning`；6 项为未注入真实供应商凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+5. **HTTP 日志复制**（已完成，2026-07-22）
+   - 输出：原始请求和原始响应各一个模块复制按钮；原始文本可由用户鼠标选中后执行原生 `Ctrl+C`；恢复原有文本块视觉，不保留试验性的逐字段表格。
+   - 专项验证：`uv run pytest tests/test_execution_frontend.py tests/test_workflow_node_runs.py -q` -> `19 passed, 1 warning`；`npm run build` 成功。
+   - 浏览器验证：两个模块复制按钮均唯一，复制内容分别保留完整请求和响应；页面显示仍只有原始请求和原始响应两个模块。
+   - 未覆盖：内置浏览器自动化无法合成原生文本拖选，未自动读取鼠标选区；已验证日志块计算样式为 `user-select: text`，且键盘和 copy 事件在存在文本选区时不会触发节点复制。需要人工鼠标拖选完成最终体验确认。
+6. **HTTP 请求 Postman 分区展示**（历史完成，已被第 10 项替代）
+   - 输出：请求行、Headers、Params、Body 分区；JSON RAW Body 解析为格式化 JSON；模块按钮复制格式化后的可读请求。
+   - 真实历史记录验证：复用既有 `POST http://127.0.0.1:9000/admin/users` 运行记录，页面显示 `POST`、Headers、空 Params 和 `BODY · RAW`；Body 为缩进后的 `{"username": "users"}`，不存在 `\"`。
+   - 复制验证：剪贴板首行为 `POST http://127.0.0.1:9000/admin/users`，包含 Headers、Params、Body 三段及可读 JSON，不包含转义引号。
+   - 页面横向溢出为 0，浏览器控制台错误为 0；专项 `19 passed, 1 warning`，最终全量 `219 passed, 6 skipped, 1 warning`。
+7. **新建节点默认 JSON Header 与 API Mock 全面验证**（已完成，2026-07-22）
+   - 输出：`defaultHttpConfig()` 新建 Headers 为 `Content-Type: application/json`，源码契约纳入 `tests/test_execution_frontend.py`；cURL 导入和已有节点加载路径不变。
+   - Mock 基线：确认 PID `28208` 监听 `127.0.0.1:9000`，按 OpenAPI 真实执行 18 个请求，覆盖 GET/POST/PUT/PATCH/DELETE、Query、JSON Body、Bearer Header、401/422、业务 `code=404` 和慢响应，全部符合 Mock 契约。
+   - 节点 API：通过 `127.0.0.1:8010` 创建临时 Workflow 并执行 14 个 HTTP 节点场景，覆盖 `${变量名}` 在 URL/Header/Params/Body 中替换、输出变量提取、原始错误响应、连接失败、空 URL、慢响应和中断；结果全部符合预期，临时 Workflow 已删除。
+   - 根因对照：同一 `POST /orders` RAW JSON 带默认 Header 时 HTTP 200、节点 `SUCCESS`；删除 Header 后 FastAPI 将 Body 识别为字符串并返回 HTTP 422、节点 `FAILED`。
+   - 浏览器 E2E：新建节点默认项可编辑；真实 POST 日志按请求行、Headers、Params、格式化 Body 展示且两个模块复制正确；删除默认项并保存、退出、重新打开后 Headers 仍为空，未自动回填；验收临时 Workflow 已删除。
+   - 最终回归：HTTP/前端专项 `19 passed, 1 warning`；`npm run build`、Python `compileall`、Workflow bundle 语法检查和 `git diff --check` 均成功；全量 `219 passed, 6 skipped, 1 warning`。
+   - 未覆盖与已知缺口：当前 API Mock 的 `/upload` 仍声明 JSON Body，不能作为 form-data、x-www-form-urlencoded 或 binary 成功链路；`retryCount / retryInterval / delayExecution / repeatExecution` 当前只由前端保存，节点执行后端尚未消费，本阶段不擅自补定义执行语义。
+8. **设置字段与 HTTP 日志标题可见性**（已完成，2026-07-23）
+   - 业务目标：节点编辑器固定为白色设置面板；无论全局亮暗主题，名称、说明、模型、HTTP、运行配置和输出变量等所有字段标题都必须清晰可见。
+   - 修复：设置页章节标题、标签页、字段名、HTTP key/value、Body 类型、折叠项及输出变量标签统一使用 `--wf-heading: #111827`；删除暗色主题将该变量覆盖为浅色的规则，避免白底白字。
+   - 日志：HTTP “原始请求 / 原始响应”标题统一为 `12px / 700`，正文和深色日志内容区保持原样。
+   - 浏览器 E2E：在 `data-theme=dark` 且编辑器背景 `rgb(255, 255, 255)` 的真实页面中，HTTP、LLM、重试和输出变量字段计算颜色均为 `rgb(17, 24, 39)`；两个日志标题均为 `12px / 700`，页面及面板横向溢出为 0，控制台错误为 0。
+   - 回归：主题与前端专项 `13 passed, 1 warning`；`npm run build`、Python `compileall`、Workflow bundle 语法检查和 `git diff --check` 均成功；全量 `220 passed, 6 skipped, 1 warning`。
+9. **HTTP 原始日志正文放大 30%**（已完成，2026-07-23）
+   - 范围：只放大原始请求与原始响应正文；日志列表摘要和“原始请求 / 原始响应”标题保持原字号。
+   - 字号：请求 Method `14px -> 18.2px`，URL、键值、Body 和响应正文 `13px -> 16.9px`，Headers/Params/Body 分组标签 `9px -> 11.7px`，均为精确 1.3 倍。
+   - 布局：Method 列宽由 `58px` 扩为 `76px`，避免 DELETE 等较长方法名放大后挤压 URL；日志内容区继续独立滚动。
+   - 浏览器 E2E：真实 HTTP 日志计算字号与上述值一致；主标题仍为 `12px`、列表摘要仍为 `10px`，页面及编辑器横向溢出为 0，控制台错误为 0。
+   - 回归：主题与前端专项 `13 passed, 1 warning`；`npm run build`、Python `compileall`、Workflow bundle 语法检查和 `git diff --check` 均成功；全量 `220 passed, 6 skipped, 1 warning`。
+   - 后续变化：第 10 项删除请求分区后，原始请求改为与原始响应一致的单一 `pre` 文本块，请求正文统一使用 `16.9px`；原始响应的 30% 放大保持不变。
+10. **Postman 式完整 HTTP 原始请求**（已完成，2026-07-23）
+   - 格式：单一原始文本块按“请求行、已记录 Headers、空行、原始 Body”排列；请求行为 `METHOD URL HTTP/1.1`，Query Params 使用 `URLSearchParams` 合并进 URL。
+   - 数据真实性：只展示运行记录中实际保存的 Headers，不伪造未持久化的 Host、User-Agent、Accept 或 Content-Length；RAW Body 保持原字符串且不进行 JSON 美化，表单 Body 按 URL 编码文本展示。
+   - 交互：删除 Postman 的 Headers/Params/Body 分区组件和对应 CSS；原始请求与原始响应使用相同日志容器、`16.9px` 正文和可选择文本；“复制原始请求”复制与页面相同的报文文本。
+   - 浏览器 E2E：真实 `POST /orders?source=raw+log` 展示请求行、两条 Header、空行和紧凑 JSON Body，不包含旧分区标签；Windows 剪贴板与页面内容一致，仅按系统规范使用 CRLF，页面横向溢出为 0，控制台错误为 0；临时 Workflow 已删除。
+   - 回归：主题、前端及节点运行专项 `24 passed, 1 warning`；`npm run build`、Python `compileall` 和 `git diff --check` 均成功；全量 `220 passed, 6 skipped, 1 warning`。
+11. **RAW JSON 请求体字段提取**（已完成，2026-07-23）
+   - 业务目标：Workflow 编排人员可用 `request.body.username` 提取 HTTP RAW JSON 请求体字段，供下游节点引用，不需要把整个请求体当作字符串再次处理。
+   - 数据契约：真实发送请求和运行日志继续保留变量替换后的 RAW 原字符串；仅输出变量提取上下文在 RAW Body 为合法 JSON 时使用 `json.loads` 解析。非 JSON RAW Body 保持字符串，不做隐式转换。
+   - 端到端验证：节点向本地 HTTP 服务发送包含 `username / password / email / question` 的多行 RAW JSON；服务收到的原文和 `request_body.body` 与编辑内容逐字符一致，`request.body.username` 成功提取为 `test`，响应字段提取同时通过。
+   - 真实页面复核：首次修复后 `8010` 仍由 2026-07-22 23:34 启动且不带 `--reload` 的旧 Uvicorn 进程提供服务，因此用户节点继续得到旧错误；重启到当前代码后，既有 `POST /register` 节点连续两次运行均为 HTTP 200 / `SUCCESS`，输出变量 `abc` 为 `test`，原始请求日志仍保存字符串。历史 `FAILED` 记录按追溯要求保留。
+   - 回归：变量解析与节点运行专项 `69 passed, 1 warning`；`npm run build`、Python `compileall` 和 `git diff --check` 均成功；全量 `220 passed, 6 skipped, 1 warning`。
+12. **游离节点可用变量解耦**（已完成，2026-07-23）
+   - 业务目标：可用变量面板只负责展示全局变量、当前节点可见的上游输出和当前节点自身输出，不因 Workflow 尚未连线完成而拒绝加载。
+   - 边界：变量面板同步草稿时使用与单节点运行相同的 `for_node_run` 不完整图模式；保存按钮和整图运行继续执行游离节点与循环依赖校验，不放宽图规则。
+   - API 验证：创建无任何连线的 HTTP 节点并真实运行后，变量 API 返回 `全局变量 / 游离 HTTP` 两组，当前节点的 `username = test` 可用；既有正常连线 LLM 用例继续覆盖上游节点输出展示。
+   - 浏览器 E2E：在用户既有单节点 Workflow 中打开游离 HTTP 节点变量面板，页面显示当前节点 `abc = test`，不再显示 `Workflow 存在游离节点: HTTP`，顶栏保持“已保存”，控制台错误为 0。
+   - 回归：Workflow、LLM、节点运行和前端专项 `47 passed, 1 warning`；`npm run build`、Python `compileall`、Workflow bundle 语法和 `git diff --check` 均成功；全量 `221 passed, 6 skipped, 1 warning`。
+
+## T13.3 Script 顶层变量输出（已完成）
+
+### 业务目标与场景
+
+- Workflow 编排人员在 Script 节点中直接编写普通 Python 顶层变量，不再为了向下游传值额外构造 `response`。
+- `print()`、stdout、stderr 和 traceback 始终属于原始运行日志，不参与业务变量提取；用户继续依据真实日志定位代码错误。
+- 一个 Script 可以配置多个输出，每行将一个 Python 顶层变量映射成供后续节点使用的 `${变量名}`，并可设置不同的对外名称和目标类型。
+
+### 已确认数据契约
+
+```text
+Python 顶层变量 --输出映射--> 对外变量名 --${变量名}--> 后续节点
+```
+
+- Script 输出配置只包含：对外变量名、Python 顶层变量名、类型。
+- Script 不再支持从 `request` 或 `response` 路径提取输出变量，不提供旧配置兼容。
+- Python 变量不存在、变量无法 JSON 序列化或类型转换失败时，节点状态为 `FAILED`，stdout/stderr 和具体错误原因必须完整保留。
+- 不同节点可以声明同名对外变量。当前节点引用变量时，唯一距离最近的上游来源覆盖更远来源。
+- 两个或更多等距上游节点声明同名变量时结果存在歧义，保存和执行均应明确报错，不按画布位置或完成时间随机选择。
+- 全局变量与节点输出同名时仍属于不同层级冲突；本子任务不擅自定义覆盖关系，继续沿用现有校验规则。
+- HTTP、LLM、Agent 的 `request / response` 原始对象和路径提取规则不变。
+
+### 子任务与逐步验证
+
+1. **数据契约与图距离解析**（已完成，2026-07-22）
+   - 输入：Workflow 节点、边、全局变量和输出映射。
+   - 输出：Script 映射规范；唯一最近上游解析；等距歧义错误。
+   - 验证结果：`uv run pytest tests/test_workflow_variables.py tests/test_workflow_drafts.py -q` -> `75 passed, 1 warning`。warning 为既有 Starlette/httpx 弃用提示。
+2. **Script Worker 顶层变量采集**（已完成，2026-07-22）
+   - 输入：Script 代码、`inputs`、`config`、配置的 Python 变量名。
+   - 输出：只返回已声明顶层变量的 JSON 快照；缺失或不可序列化时返回真实 traceback。
+   - 验证结果：`uv run pytest tests/test_tool_execution.py tests/test_workflow_node_runs.py -q` -> `17 passed, 1 warning`。覆盖多变量、别名、缺失变量、不可序列化、类型转换失败、原始日志、超时与中断。
+3. **Script 节点编辑 UI**（已完成，2026-07-22）
+   - 输入：Script 节点 `outputVariables`。
+   - 输出：对外变量名、Python 变量、类型三列；移除 Script 的提取表达式；默认代码不再构造 `response`。
+   - 验证结果：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` -> `8 passed, 1 warning`。桌面浏览器交互合并到子任务 4 E2E。
+4. **完整工作流回归**（已完成，2026-07-22）
+   - 输入：包含多变量、别名、同名远近覆盖和等距冲突的实际 DAG。
+   - 输出：后续节点可通过 `${变量名}` 使用确定值；失败/日志/中断行为不回归。
+   - API 验证：三段 Script 串行 DAG 使用同名 `message`，节点数组顺序被刻意打乱；下游仍稳定取得唯一最近上游值。等距分支同名变量在保存时明确报错。
+   - 浏览器 E2E：在 `http://127.0.0.1:8010/` 新建 Workflow，打开 Script 节点，确认“变量名 / Python 变量 / 类型”三列和默认 `msg` 代码；配置 `message <- msg / STRING` 后单节点运行状态为 `SUCCESS`，变量面板显示 `message = 介绍一下自己`，展开日志同时显示原始 stdout 和原始变量快照。临时 Workflow 已删除。
+   - 历史草稿验证：旧 Script `response` 映射可以被列表和详情读取以供人工修正，但保存和执行均按新协议拒绝，不继续提供旧提取兼容。
+   - 最终回归：`uv run pytest -q` -> `214 passed, 6 skipped, 1 warning`；6 项为未注入真实模型凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+   - 静态与构建：`uv run python -m compileall -q execution web tests` 成功；`npm run build` 成功。
+
+### T13.3 验收结论
+
+- 简单 Script 只需声明普通顶层变量并在输出区映射一次，无需构造 `response`。
+- 支持一个节点映射多个变量、同名或别名输出及严格类型转换。
+- 缺失变量、不可序列化值和类型转换失败均使节点 `FAILED`，同时保留原始 stdout、stderr、变量快照和 traceback。
+- 后续节点继续使用 `${变量名}`；重名来源按唯一最近上游解析，等距歧义不会产生随机结果。
+- HTTP、LLM、Agent 的既有 `request / response` 路径提取未改变。
+
+## T13.4 Script 原始控制台与可选输出（已完成）
+
+### 业务背景与目标
+
+- Script 作者以 PyCharm 等 Python IDE 的控制台为心智模型，需要按真实发生顺序查看 `print()`、stderr、Python traceback 和系统警告，而不是在日志页阅读经过 JSON 解析或字段拆分的内容。
+- 日志只负责复现执行过程，不参与变量提取；节点间传参继续使用 T13.3 的 Python 顶层变量映射。
+- 条件分支没有生成某个已配置输出时，不应把已经正常完成的脚本误判为失败。
+
+### 已确认规则
+
+- Script 日志显示单一原始控制台，不解析 JSON、不从日志提取字段、不把请求或变量快照混入控制台正文。
+- 底层继续分别保存 stdout、stderr；同时按接收顺序保存合并后的 `console`，用于还原控制台。
+- 配置的 Python 顶层变量不存在时，该对外变量输出 `null`，控制台追加明确 `[WARNING]`，节点保持 `SUCCESS`。
+- 真实 Python 异常、超时、进程中断、不可序列化值和已配置类型转换失败仍按既有规则处理；本阶段不擅自放宽。
+- HTTP、LLM、Agent 日志布局和 `request / response` 提取不变。
+
+## T13.5 Script 普通 Python 兼容性（已完成）
+
+### 业务背景与缺陷
+
+- 用户需要将在 PyCharm 中可执行的普通非交互 Python 代码直接放入 Script，包括常见的 `response = requests.get(...)` 写法。
+- 当前通用 Worker 仍为 Agent 兼容保留顶层 `response`，并在 Script 完成后强制序列化它；当 `response` 是 `requests.Response` 等普通 Python 对象时，业务代码本身成功却被平台错误判为失败。
+- 历史 Workflow 仍可能保存 `response.stdout` 等旧 Script 提取配置。当前新协议在保存前拒绝这些记录，导致新代码根本没有写入和运行，页面只能看到旧失败日志。
+
+### 已确认目标与验收
+
+- Script 中 `response` 与其他变量名完全等价，不具备平台保留语义；只有 Agent 继续使用顶层 `response` 作为结构化结果。
+- Script 只序列化明确配置的 Python 输出变量，不扫描或序列化其他局部/全局对象。
+- 历史 Script 输出行缺少 `pythonVariable` 时，自动以对外变量名作为可选 Python 变量来源；不存在则按 T13.4 输出 `null` 和警告，不阻止保存或执行。
+- 真实验收使用用户代码访问 `http://127.0.0.1:9000/chat/1`：HTTP 200、JSON 正常打印、节点 `SUCCESS`，且 `requests.Response` 不触发序列化错误。
+- 交互式 stdin、桌面 GUI、未安装依赖和超出 Worker 进程权限的代码不属于“PyCharm 可执行即平台必然可执行”的承诺范围。
+
+## T13.9 全节点原始日志视觉契约（已完成）
+
+### 业务背景与目标
+
+- Workflow 编排人员需要在 HTTP、AGENT、LLM、SCRIPT 节点中用同一种控制台视觉阅读真实请求、响应、stdout、stderr 和 traceback，避免切换节点类型后字体大小、行距和背景发生跳变。
+- Script 原始控制台是本阶段的基准；日志只展示和复制真实原文，不改变底层日志结构、变量提取、最近 10 次记录或错误语义。
+
+### Script 基准契约
+
+- 适用范围：节点日志页中展开后的原始日志正文；不包含历史摘要行、模块标题、Provider 元信息、状态色、复制按钮和 Python 编辑器。
+- 字体：`Consolas, "SFMono-Regular", monospace`。
+- 字号：`14.3px`。
+- 行高：`1.6`。
+- 背景：纯黑 `#000000`。
+- 正文：浅色 `#e3e8ef`。
+- 交互：保留原始换行、独立滚动、鼠标选区、原生 `Ctrl+C` 和整段复制；不得解析或重组日志正文。
+- 优先级：本节是四类节点原始日志正文的最新统一约定，覆盖 T13.6 第 9-10 项和 T13.8 中不同节点使用独立正文字号的历史记录。
+
+### 四类节点扫描结果（2026-07-23）
+
+| 节点 | 当前渲染 | 字体/背景 | 与 Script 契约差异 |
+|---|---|---|---|
+| SCRIPT | 只读控制台 `textarea` | Consolas / 14.3px / 1.6 / `#000000` / `#e3e8ef` | 基准，已符合 |
+| HTTP | 原始请求、原始响应 `pre` | Consolas / 16.9px / 1.55 / `#000000` / `#dbe6f5` | 字号、行高、正文色不同 |
+| LLM | 原始请求、stdout、response、stderr、traceback `pre` | Consolas / 16.9px / 1.55 / `#000000` / `#dbe6f5` | 字号、行高、正文色不同 |
+| AGENT | 与 LLM 共用原始日志 `pre` | Consolas / 16.9px / 1.55 / `#000000` / `#dbe6f5` | 字号、行高、正文色不同 |
+
+### 子任务与验收
+
+1. **契约与差异扫描**（已完成，2026-07-23）
+   - 输出：上述 Script 基准、适用边界和四类节点差异矩阵。
+2. **共享样式改造**（已完成，2026-07-23）
+   - 输出：`.wf-inspector` 定义 `--wf-raw-log-*` 字体、字号、行高、背景和正文色变量；Script `textarea` 与 HTTP/AGENT/LLM `pre` 共同引用。
+   - 结果：四类节点统一为 Consolas / 14.3px / 1.6 / `#000000` / `#e3e8ef`，历史摘要、模块标题、状态色和复制交互不变。
+   - 验证：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py tests/test_workflow_node_runs.py -q` -> `20 passed, 1 warning`。
+3. **浏览器与完整回归**（已完成，2026-07-23）
+   - SCRIPT 与 LLM 的浏览器计算样式均为 `rgb(0, 0, 0)` 背景、`rgb(227, 232, 239)` 正文、Consolas 字体、14.3px 字号和 22.88px 行高。
+   - HTTP 真实原始请求/响应以及临时 AGENT 的请求、stdout、response、stderr 均显示同一黑底控制台；历史摘要继续使用浅色背景，长内容保留独立滚动。
+   - 临时 AGENT Workflow `3e1fd08557b446b793d80faa9cc0700c` 执行 `SUCCESS` 后已删除，列表恢复为 2 个原有 Workflow。
+   - 最终回归：`uv run pytest -q` -> `220 passed, 6 skipped, 1 warning`；6 项为未注入真实模型凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+   - `npm run build`、`uv run python -m compileall -q execution web tests` 和 `git diff --check` 均成功。
+
+## T13.8 Workflow Studio 字体与节点编辑器视觉调整（已完成）
+
+### 已确认边界
+
+- 最新决策：Script / Agent 的 Python CodeMirror 编辑器与日志统一使用 `Consolas, "SFMono-Regular", monospace`；Workflow Studio、节点设置和其他页面保持各自默认字体。
+- 已下载的 Droid 字体资产继续保留但不应用到界面，避免改变本任务之外的静态资源状态。
+- 只有展开后的原始日志内容使用纯黑背景，日志历史摘要行继续使用浅色背景。
+- Python 编辑器可视高度由 360px 增加 50% 至 540px。
+- 节点设置页中的节点名、页签、字段标签和配置分组标题使用深黑色；状态、错误和操作按钮保留语义色。
+
+### 子任务与验证
+
+1. **本地字体资产与作用域**（已完成，2026-07-23，最终不启用 Droid）
+   - 引入 `DroidSansMonoSlashed.ttf`、OFL 1.1 文本和来源/哈希记录；字体通过 `/assets/fonts/` 由本机服务提供。
+   - esbuild 将 `/assets/*` 保持为运行时静态 URL；`npm run build` 成功。
+   - `uv run pytest tests/test_execution_frontend.py -q` 覆盖字体静态资源、缓存版本，以及 Python 编辑器与日志使用相同 Consolas 字体栈的最终规则。
+2. **日志、编辑器高度和标题颜色**（已完成，2026-07-23）
+   - Script 控制台、LLM/Agent 原始响应和 HTTP 原始请求/响应内容区使用纯黑背景；历史摘要行保持浅色。
+   - 原始日志正文在既有字号上放大 30%：Script 控制台为 14.3px，HTTP/LLM/Agent 原始文本为 13px；历史摘要字号不变。
+   - Python 编辑器固定内容高度由 360px 调整为 540px；设置页通过既有滚动容器访问后续运行配置。
+   - 节点名、页签、字段标签、变量标题以及 LLM/HTTP/运行配置分组统一使用 `--wf-heading: #111827`；状态和错误语义色不变。
+   - `npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` -> `9 passed, 1 warning`。
+3. **桌面浏览器和完整回归**（已完成，2026-07-23）
+   - 浏览器确认 Python CodeMirror 与日志统一使用 Consolas 等宽字体，节点界面继续使用 Inter/Segoe UI。
+   - 编辑器网格行为 `32.5px 540px`，设置容器可滚动访问运行配置；节点名、页签和字段标签计算色为 `rgb(17, 24, 39)`。
+   - Script 日志历史行保持浅色，展开控制台为纯黑背景、浅色正文；放大后的 traceback 保留完整横向和纵向滚动。HTTP/LLM/Agent 黑底和 13px 正文由同一专项测试覆盖。
+   - 最终回归：`uv run pytest -q` -> `220 passed, 6 skipped, 1 warning`；6 项为未注入真实模型凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+   - `npm run build`、`uv run python -m compileall -q execution web tests` 和 `git diff --check` 均成功。
+
+## T13.7 Python 编辑器与控制台复制（已完成）
+
+### 业务目标与验收
+
+- Script / Agent 的 `main.py` 使用 Python 语法高亮，提升长脚本的阅读、修改和排错效率；节点数据仍保存纯字符串，不改变执行协议。
+- Script / Agent 不再提供独立“代码”页签；Python 编辑器嵌入“设置”页并位于运行配置上方，配置、代码和输出映射在同一滚动工作面完成。
+- 用户在 Script 原始控制台拖选文本后按 `Ctrl+C`，必须复制浏览器文本选区，不能触发画布节点复制。
+- 原始控制台提供独立复制按钮，一次复制本次控制台的全部原文，并显示成功或失败反馈。
+- Script / Agent 代码编辑器使用适合桌面节点编辑器的 16px 字号；行号、代码和光标同步缩放。
+- 日志摘要中的执行时间、耗时和最终结果概览统一为 14px，并加宽固定列；长结果继续单行省略显示。
+- 画布节点多选复制、代码编辑器自身快捷键、最近 10 次日志和其他节点日志布局不得回归。
+
+### 实施子任务
+
+1. **现状确认**（已完成，2026-07-22）
+   - 代码区为普通 textarea，项目没有可复用 CodeMirror 资产。
+   - 画布已存在 `hasBrowserTextSelection()` 保护，文本选区不会被节点复制逻辑主动覆盖；仍需真实浏览器验证。
+2. **CodeMirror Python 编辑器**（已完成，2026-07-22）
+   - 引入 CodeMirror 6、Python language 和 one-dark 主题，`mainPy` 仍为受控字符串。
+   - `npm run build` 成功；前端专项 `8 passed, 1 warning`。
+3. **控制台复制按钮与反馈**（已完成，2026-07-22）
+   - Script 原始控制台支持鼠标选区，并提供独立的一键复制按钮、成功状态和错误提示。
+   - 普通 Clipboard API 和 `execCommand` 均不可用时，调用仅绑定本机应用的 Windows 系统剪贴板回退，确保内置浏览器仍能一键复制；最大文本与单次日志上限一致为 5 MB。
+   - `npm run build` 成功；前端专项 `uv run pytest tests/test_execution_frontend.py -q` -> `8 passed, 1 warning`。
+4. **构建、测试和浏览器回归**（已完成，2026-07-22）
+   - 自动回归：`npm run build`、`uv run python -m compileall -q execution web tests` 和 `git diff --check` 均成功；`uv run pytest -q` -> `219 passed, 6 skipped, 1 warning`。
+   - 浏览器验收：Script 设置页仅显示“设置 / 日志”，16px CodeMirror 位于运行配置上方；Python 关键字、字符串、函数、参数和常量使用不同颜色，行号与代码同步缩放，无文本遮挡。
+   - 控制台验收：日志同时显示原始 stdout `stdout copy target` 和 stderr `stderr copy target`；一键复制显示“控制台已复制”，Windows 剪贴板内容与两行原文完全一致。
+   - 日志正文改为只读文本控制台，浏览器原生维护鼠标选区和 `Ctrl+C`；其 `copy` 事件在组件内停止传播，画布节点复制不会覆盖日志文本。内置浏览器自动化对原生拖选合成不稳定，未将该工具限制误报为页面失败。
+   - 临时验收 Workflow `ded6732203754d1ebfe73c5615462548` 已删除，列表恢复为 2 个原有 Workflow。
+
+### 子任务
+
+1. **解除 Script `response` 保留语义并放宽旧映射**（已完成，2026-07-22）
+   - Script 模式不再预置、读取或序列化顶层 `response`；Agent 协议不变。
+   - 旧 Script 输出行缺少 `pythonVariable` 时以对外变量名为可选来源，不再阻止保存。
+2. **专项和真实 HTTP 运行验证**（已完成，2026-07-22）
+   - 专项结果：`uv run pytest tests/test_tool_execution.py tests/test_workflow_variables.py tests/test_workflow_drafts.py tests/test_workflow_node_runs.py -q` -> `97 passed, 1 warning`。
+   - 真实结果：用户提供的 `requests` 代码原样访问 `http://127.0.0.1:9000/chat/1`，Worker `ok: true`，HTTP 200 JSON 完整进入 stdout/console，顶层 `response` 未被序列化。
+3. **前端历史映射归一化与浏览器回归**（已完成，2026-07-22）
+   - 已完成：旧 Script 行 `name + value=response.xxx` 加载后归一化为 `pythonVariable=name` 并移除旧 value；`npm run build` 成功，前端专项 `8 passed, 1 warning`。
+   - 浏览器结果：用户原代码在旧映射 Workflow 中保存并运行成功，节点 `SUCCESS`，控制台打印真实订单 JSON，遗留 `msg` 为 `null` 警告；临时 Workflow 已删除。
+4. **全量回归与服务检查**（已完成，2026-07-22）
+   - `uv run pytest -q` -> `217 passed, 6 skipped, 1 warning`；跳过项为未注入真实模型凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+   - `uv run python -m compileall -q execution web tests`、`npm run build`、`git diff --check` 均成功。
+
+### T13.5 验收结论
+
+- 用户提供的 `requests` 代码无需改名即可执行，顶层 `response` 可以保存任意普通 Python 对象且不会被 Script 平台隐式序列化。
+- Script 仅序列化输出区明确绑定的 Python 变量；未绑定的模块、客户端、响应对象、函数和其他运行时对象不会影响节点成功状态。
+- 历史 `response.xxx` Script 映射不再阻止保存和执行，加载后自动转为同名可选顶层变量；缺失时输出 `null` 和控制台警告。
+- 真实 `9000/chat/1` 与桌面浏览器两条链路均验证节点 `SUCCESS` 和完整控制台 JSON 输出。
+
+### 子任务与验证
+
+1. **协议记录**（已完成，2026-07-22）
+   - 输出：上述可观测行为和数据边界写入计划。
+   - 验证结果：用户确认日志不做字段提取，并选择缺失顶层变量输出 `null`、控制台警告、节点保持 `SUCCESS`。
+2. **Worker 与持久化**（已完成，2026-07-22）
+   - 输出：缺失变量补 `null` 和警告；有序 `console` 持久化及历史库迁移。
+   - 验证结果：`uv run pytest tests/test_tool_execution.py tests/test_workflow_variables.py tests/test_workflow_drafts.py tests/test_workflow_node_runs.py -q` -> `95 passed, 1 warning`。覆盖 stdout/stderr 顺序、缺失变量 `null`、警告、数据库迁移、真实异常、类型失败和中断。
+3. **Script 控制台 UI**（已完成，2026-07-22）
+   - 输出：Script 运行详情只显示单一控制台，其他节点不回归。
+   - 验证结果：`npm run build` 成功；`uv run pytest tests/test_execution_frontend.py -q` -> `8 passed, 1 warning`。桌面浏览器 E2E 合并到子任务 4。
+4. **完整回归**（已完成，2026-07-22）
+   - 最终回归：`uv run pytest -q` -> `215 passed, 6 skipped, 1 warning`；6 项为未注入真实模型凭据的 live 测试，warning 为既有 Starlette/httpx 弃用提示。
+   - 静态与构建：`uv run python -m compileall -q execution web tests`、`git diff --check`、`npm run build` 均成功。
+   - 浏览器 E2E：临时 Workflow 的 Script 依次打印 stdout、stderr，并配置一个不存在的顶层变量；节点状态为 `SUCCESS`，结果包含 `missing: null`，展开日志只显示一个 `Script 原始控制台`，正文顺序为 stdout、stderr、`[WARNING]`，没有请求、响应或变量字段分区。
+   - 清理与服务：临时 Workflow 已删除；`http://127.0.0.1:8010/` 保持单一监听端口并恢复到用户原工作流列表。
+
+### T13.4 验收结论
+
+- Script 日志不做字段提取，控制台原样保留 stdout、stderr、Python traceback 和系统警告的接收顺序。
+- 顶层 Python 变量映射继续作为唯一节点间传参方式，控制台文本不参与传参。
+- 缺失顶层变量输出 `null` 并警告，不再把正常完成的 Script 误判为失败。
+- 真实执行错误仍为 `FAILED`；HTTP、LLM、Agent 的日志和输出协议未改变。
 
 ## 1. 业务背景与目标（Why）
 
@@ -1578,3 +1938,258 @@ T13.2.1-T13.2.6 已完成
 - 运行时使用 `ssl.create_default_context(cafile=...)` 构建 HTTPX SSLContext，并保持 `verify_ssl=true`；模型发现、测速、单模型测试、Workflow 阻塞和流式请求必须复用同一证书上下文。
 - CA 文件缺失、格式错误或不可读取时在发起网络请求前给出明确错误；不得静默降级为 `verify=False`。
 - UI 优先引导用户配置内部 CA，关闭“验证 SSL 证书”仅保留为可信内网临时联调手段，并持续显示“不安全”状态。
+
+### 22.3 SCRIPT 节点待优化项
+
+#### 业务背景与目标（Why）
+
+- SCRIPT 是企业 Agent 测试流程中的 Python 胶水层，用于调用公网或内网接口、读取和转换数据、执行规则校验、聚合结果并向后续节点输出多个业务变量。
+- 当前产品面向本机使用，核心价值是“普通非交互 Python 在环境和权限允许时可直接运行、原始控制台可以排错、顶层变量可以稳定传递”，不是建立受限插件生态。
+- 优化目标是提高运行配置的真实性、单节点测试的可复现性和 Python 环境问题的可诊断性，同时继续遵守原始日志铁律。
+
+#### 目标用户与真实场景（Who & Where）
+
+- Workflow 编排人员在 Workflow Studio 中编写和调试 Python，通过 `inputs` 读取全局变量和上游输出，并将明确配置的 Python 顶层变量映射为下游 `${变量名}`。
+- 用户会直接复用在 PyCharm 中运行的 `requests`、JSON 处理、文件处理和业务校验代码，需要看到真实 stdout、stderr、traceback 和依赖错误。
+- 单节点调试经常需要复用上游某次成功输出；如果只能隐式读取“最近一次成功结果”，测试输入可能陈旧或随历史运行变化，无法稳定复现问题。
+
+#### 行业调研结论
+
+| 产品 | Code / Function 节点的代表能力 | 对 Agent Bench 的适用判断 |
+|---|---|---|
+| Dify | Python/JavaScript、声明式输入输出、独立沙箱、自动重试、失败分支和输出限制 | 借鉴重试与失败语义；严格沙箱不符合当前真实 Python、内网请求和文件处理定位 |
+| n8n | 整批/逐条执行、固定并编辑测试数据、独立 Task Runner、代码格式化和受控依赖 | 优先借鉴固定测试输入；逐条/整批模式需等待数组、循环和聚合协议 |
+| Node-RED | 多输出、异步完成、节点/流程/全局状态、启动/停止钩子、日志级别和动态状态 | 更适合长期事件流；持久状态和生命周期会降低本项目测试可复现性 |
+| Langflow | 类型化输入输出、Python Interpreter、Mock Data、依赖声明、Check & Save | 借鉴语法检查、依赖诊断和测试数据能力，不引入其完整组件框架 |
+| Flowise | 显式输入变量、全局变量、运行时状态、工具调用和沙箱执行 | 显式变量已具备；工具调用和运行时状态当前会扩大执行协议和维护成本 |
+
+参考资料：
+
+- Dify Code：<https://github.com/langgenius/dify-docs/blob/main/en/self-host/use-dify/nodes/code.mdx>
+- n8n Code：<https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/>
+- n8n Pin and Mock Data：<https://github.com/n8n-io/n8n-docs/blob/main/docs/build/work-with-data/pin-and-mock-data.md>
+- Node-RED Function：<https://nodered.org/docs/user-guide/writing-functions>
+- Langflow Python Interpreter：<https://docs.langflow.org/python-interpreter>
+- Flowise Custom Function：<https://github.com/FlowiseAI/Flowise/blob/main/packages/components/nodes/utilities/CustomFunction/CustomFunction.ts>
+
+#### 需求真实性与优先级（What & When）
+
+| 优先级 | 优化项 | 决策与原因 |
+|---|---|---|
+| P0 | 运行配置真实性 | 当前前端展示 `retryCount / retryInterval / delayExecution / repeatExecution`，后端实际只从 `data.config` 读取超时；界面值与执行行为不一致，属于正确性缺陷 |
+| P0 | 超时与重试契约 | 优先落实节点超时、重试次数和重试间隔；每次尝试必须可追溯，总耗时累加，中断必须终止当前尝试及等待中的后续重试 |
+| P0 | 暂停未定义配置 | “延迟执行”当前价值较低；“重复执行”涉及副作用、停止条件和多次结果合并。协议确认前隐藏或删除，禁止继续展示无效配置 |
+| P1 | 固定测试输入/上游快照 | 单节点测试可选择并编辑确定的全局变量和上游输出快照，避免依赖上游最近一次成功结果；不得影响正式整图执行语义 |
+| P1 | Python 语法检查 | 使用与 Worker 相同的 Python 解释器执行 `compile()`，在不启动节点运行的情况下返回准确文件名、行号、列号和原始错误 |
+| P1 | 依赖检查与环境可见性 | 识别代码中可静态判断的顶层 import，显示已安装、缺失和版本；动态 import 明确标为无法静态确认；不得自动执行 `pip` 或修改环境 |
+| P2 | 显式代码格式化 | 只在用户主动点击时格式化 Python，不在保存或运行时静默改写代码；格式化失败不得覆盖原代码 |
+| P2 | 常用起始模板 | 提供 HTTP 请求、JSON 转换、断言校验和多个顶层输出变量等最小模板，帮助用户快速写出可运行代码，但不恢复工具仓库或模板运行时引用 |
+| P2 | 文件与 Artifact 输出 | 为报告、图片、大型 JSON 等非普通变量结果建立受控 Artifact 契约，避免把大文件或 Base64 数据塞入节点变量；不得暴露任意本机路径 |
+| P3 | 代码持久化历史与 Diff | 在多人协作或版本追溯需求明确后再实现，不阻塞当前本机快速迭代 |
+| P3 | 资源限制与更强隔离 | 当前继续使用独立子进程；只有产品转为远程、多用户或执行不可信代码时，才把容器隔离、CPU/内存限制升级为 P0 |
+
+#### 保持不变的执行与日志契约
+
+- SCRIPT 继续只支持 Python，不增加 JavaScript、交互式 stdin、桌面 GUI、完整断点调试器或插件市场。
+- 用户代码继续运行在项目 `.venv` 的独立子进程中，允许使用已安装标准库和第三方包；依赖仍通过 `pyproject.toml + uv sync` 显式管理。
+- `print()`、stdout、stderr、Python traceback 和平台警告继续按接收顺序显示原始内容，不做结构化提取、重组、摘要替换或自动脱敏推断。
+- 日志只用于诊断，不参与业务变量提取；节点输出继续来自输出区明确映射的 Python 顶层变量。
+- 未配置输出变量时脚本可以成功；已配置但不存在的顶层变量继续输出 `null`、写入原始警告并保持 `SUCCESS`；真实执行异常仍为 `FAILED`。
+- 不增加持久节点上下文、启动/停止钩子或隐式跨 Run 状态，避免测试结果依赖历史执行。
+- 不增加“逐条/整批执行”、多输出路由或 Script 内调用其他画布工具，除非数组、条件分支、循环、聚合和副作用规则先完成独立业务确认。
+
+#### 待确认的业务规则
+
+- 重试范围：只重试异常、超时和明确的可重试错误，还是所有 `FAILED`；用户代码已经产生外部副作用时是否允许自动重试。
+- 重试日志：每次 attempt 独立保留完整控制台，还是在同一节点运行记录中按 attempt 分段；两种方案都不得丢失原始文本。
+- 固定测试输入是否持久化到 Workflow 草稿。建议采用 n8n 语义：只对单节点调试生效，正式整图执行始终忽略固定数据并使用真实上游输出，实施前必须确认。
+
+#### 验收标准与价值验证（How to Measure）
+
+- 配置重试 2 次时，最多执行 3 个 attempt；每次开始时间、结束状态、错误、控制台和耗时可追溯，节点总耗时等于全部尝试与间隔的累计时间。
+- 节点运行、重试等待或延迟阶段点击中断后，不再开始新的 attempt；当前 Worker 及派生进程被终止，节点状态为 `INTERRUPTED`，后代节点不执行。
+- 节点设置页不存在任何保存后不影响执行的运行配置；未完成后端契约的字段必须隐藏或标为不可用，不能以可编辑状态误导用户。
+- 单节点测试可以固定、编辑、清除和重新获取输入快照；同一快照重复运行得到相同输入，正式整图运行不读取测试快照。
+- 语法错误在 Worker 启动前返回 `<workflow-node-main.py>` 的准确行号、列号和原始消息；检查过程不产生节点运行记录。
+- 依赖检查能列出已安装包及版本和明确缺失包；不会安装包、修改 `pyproject.toml`、执行用户代码或声称动态 import 已验证。
+- 原始控制台在成功、失败、超时、重试和中断场景中始终保留真实 stdout、stderr 与 traceback 顺序，继续支持鼠标选择、原生 `Ctrl+C` 和整段复制。
+- 多个输出变量仍按“对外变量名 + Python 顶层变量名 + 类型”独立转换并传递；新增优化不得恢复基于日志、`request` 或固定 `response` 结构的 Script 字段提取。
+
+#### 实施顺序与验证门禁
+
+1. **运行配置审计与协议冻结**：列出前端所有配置字段、持久化位置和后端消费者；确认重试、副作用、attempt 日志与测试快照规则。验证为字段到行为的一一对应表，未确认项不得进入实现。
+2. **超时与重试后端闭环**：实现 attempt、累计耗时、中断和后代阻断，并补充异常、超时、先失败后成功、连续失败和重试等待中断测试。专项测试通过后再改前端。
+3. **运行配置 UI 收敛**：只展示已经具备后端行为的字段，移除或隐藏延迟/重复执行；使用真实 API 和浏览器 E2E 验证保存、重开、运行与日志。
+4. **固定测试输入**：在不影响正式执行的前提下实现测试快照 CRUD 和单节点执行入口；覆盖上游历史变化、快照清除和整图忽略快照。
+5. **语法与依赖诊断**：复用 Worker Python 环境完成只读检查；覆盖标准库、已安装第三方包、缺失包、动态 import 和语法错误。
+6. **P2 能力评估**：模板、格式化和 Artifact 分别按独立业务需求立项，每项都需单独测试，不与 P0/P1 打包上线。
+
+每个子任务必须依次执行相关单元测试、静态检查、前端构建、真实 API 流程和桌面浏览器 E2E；前一项未通过时暂停依赖任务。完整回归必须继续覆盖 Script 普通 Python、原始日志、多个顶层输出变量、超时、中断、后代阻断以及 HTTP/AGENT/LLM 节点不回归。
+
+### 22.4 HTTP 节点待优化项（调研完成，开发未开始）
+
+#### 状态与决策边界
+
+- 本节记录 2026-07-23 对 Dify、n8n、Azure Logic Apps 和 Postman 官方能力的调研结论，以及结合企业 Agent 测试场景形成的候选优化项。
+- 本节不是已确认开发需求。除已在历史沟通中明确的规则外，标记为“待确认”的行为不得直接实现。
+- HTTP 节点的目标不是复制完整 Postman，而是稳定调用内网 FastAPI 或真实企业 Agent 环境、传递上游变量、保留可追溯原始请求与响应，并为下游 SCRIPT / AGENT 分析提供可靠数据。
+
+#### 业务背景与目标（Why）
+
+- 当前基础请求编辑能力已经覆盖 Method、URL、Headers、Params、Body、cURL 导入、`${变量名}` 替换、类型化输出变量和原始请求/响应日志；继续堆叠普通 API 客户端功能的边际价值有限。
+- 主要风险转为执行正确性和规模承载：部分运行配置只在前端保存但后端不消费；Body 类型存在界面可选但运行协议不完整的情况；非 2xx 响应无法继续提取变量；大响应完整进入 SQLite 和浏览器后会在批量 Run 中放大存储与渲染成本。
+- 优化顺序应为“执行正确性 > 结果可追溯 > 内网连接能力 > 功能广度”。
+
+#### 用户与真实场景（Who / Where）
+
+- 企业测试工程师在本机画布中配置 HTTP 节点，调用内网 FastAPI 数据提取层或未来真实企业 Agent 环境。
+- 单次企业 Agent 调用可能持续四到五分钟，响应可能包含数百到数千行数据；测试人员需要在失败后查看原始请求/响应，并把结构化字段继续传递给下游节点。
+- 并发数、整批重复执行、定时任务和 Run 级等待策略属于 Run 调度，不应继续堆在单个 HTTP 节点中。
+
+#### 同类产品能力对照
+
+| 能力 | 同类产品 | 当前状态 | 候选结论 |
+|---|---|---|---|
+| Method、URL、Headers、Params、Body | Dify / n8n 标配 | 已支持 | 保留现状 |
+| cURL 导入 | n8n / Postman 支持 | 已支持 | 当前足够，不优先增加 OpenAPI 导入或 cURL 导出 |
+| 上游变量引用 | Dify 支持深层变量，n8n 支持表达式 | 已支持 `${变量名}` 和输出提取 | 保持受限表达式，后续可补变量选择与插入交互 |
+| 超时 | Dify 区分连接、读取、写入；n8n 支持请求超时 | UI 没有真实超时输入；Worker 外层默认 120 秒，HTTPX 内层默认 30 秒 | P0：统一单一配置来源并真实生效 |
+| 重试 | Dify 支持次数/间隔；Logic Apps 支持固定/指数策略 | `retryCount / retryInterval` 只在前端保存 | P0：实现已确认的连接失败/超时重试 |
+| Body 类型 | Dify / n8n 支持 JSON、Raw、URL encoded、multipart 和文件 | RAW 可用；FORM_DATA 由 `data=` 发送；Binary 界面可选但后端拒绝 | P0：修正真实协议或隐藏尚不可用入口 |
+| HTTP 错误策略 | Dify 支持错误分支；n8n 支持 Never Error | 非 2xx 一律 FAILED，不能提取输出变量 | P0/P1：允许保留响应并按策略决定是否继续 |
+| 响应结构 | Dify 输出 body/status/headers/files；n8n 可返回完整响应 | 已输出 `status_code / headers / body` | 当前结构可保留 |
+| 大响应处理 | 常见文件变量、Artifact、截断预览或响应优化 | 完整响应进入 SQLite 和浏览器 | P0：建立完整 Artifact 与受控预览 |
+| 认证与凭据 | Basic、Bearer、API Key、OAuth、凭据复用 | 只能手填 Header | P1：依赖 22.1，先做本机凭据绑定，不一次实现全部 OAuth |
+| SSL、代理、重定向 | Dify / n8n 提供节点或连接配置 | 后端存在隐藏默认值，前端不可设置 | P1：复用 Provider 的显式路由和 TLS 语义 |
+| 分页、批处理 | n8n 支持 | 不支持 | 当前企业 Agent 调用场景不需要，暂缓 |
+| 请求前后脚本 | Postman 支持 | 可通过独立 SCRIPT 节点实现 | 不并入 HTTP 节点 |
+
+#### 候选优先级（What / When）
+
+##### P0：执行正确性与规模风险
+
+1. **统一并落实超时与重试**
+   - 删除当前 HTTPX 30 秒与 Worker 120 秒的隐式双重默认，建立可解释的单一配置来源。
+   - 已确认规则继续有效：连接失败或超时按自定义次数和间隔重试；收到业务响应后不重试。HTTP 429/5xx 是否属于可重试服务失败仍未确认，不得自行加入。
+   - 每次尝试必须记录序号、失败类型、等待时间和最终结果；中断必须终止当前请求和后续重试。
+
+2. **修正 Body 类型真实性**
+   - `application/x-www-form-urlencoded` 必须按 URL encoded 发送，`multipart/form-data` 必须产生真实 multipart 请求。
+   - 切换 Body 类型时必须处理新建节点默认的 `Content-Type: application/json`，避免表单数据仍声明为 JSON。
+   - Binary 在文件变量、持久化和 Artifact 协议确认前不得继续表现为已可运行功能。
+
+3. **保留失败响应并支持后续分析**
+   - 只要远端已经返回 HTTP 响应，就必须保留并允许提取 `response.status_code / response.headers / response.body`。
+   - 节点状态与 Workflow 是否继续执行必须拆开定义，支持负向测试用例分析 400、401、422、500 等响应；默认继续还是默认终止仍待确认。
+
+4. **大响应 Artifact 化**
+   - 完整原始响应保存为本机 Artifact，运行记录保存路径或 ID、大小、摘要、哈希和受控预览；不得只截断后丢失原文。
+   - 输出变量提取必须针对完整响应执行，不得因日志预览截断而改变测试判断。
+   - Artifact 大小上限、保留周期、压缩方式和清理策略尚未确认。
+
+##### P1：内网连接与可维护性
+
+- 依赖 22.1 增加本机凭据绑定，首批只考虑 Bearer、API Key、Basic 和自定义 Header；真实秘密不得进入 Workflow 导出、Git 或普通日志。
+- 为 HTTP 节点或 Target 建立显式 `SYSTEM / DIRECT / CUSTOM` 代理模式、正向 SSL 验证开关、按需自定义 CA 和重定向策略；不得按公网/内网 IP 自动猜测路由。
+- 在 Headers、Params、Body 等字段增加可见变量选择/插入，不扩展为任意 Python 或 JavaScript 表达式。
+- 增加变量解析后的请求预览，但凭据和已知秘密必须脱敏；原始执行日志继续记录真实请求的非秘密部分。
+
+##### P2：有真实用例后再评估
+
+- 重复 Query 参数和数组编码格式、Cookie Jar、客户端证书、OAuth1/OAuth2、文件上传/下载、分页和批处理。
+- GraphQL、SSE、WebSocket、gRPC 等协议不作为当前 HTTP 节点的隐式扩展。
+
+#### 明确不并入 HTTP 节点的能力
+
+- 并发数、整批重复执行、延迟执行和定时任务属于 Run 调度。
+- 业务断言、响应质量判断和前后置脚本分别由 SCRIPT / AGENT 节点承担。
+- 面向 LLM 的通用“响应优化”不替代当前明确、可追溯的输出变量提取。
+
+#### 待确认决策
+
+1. 超时口径：`A` 一次节点运行共享总超时预算；`B` 每次重试重新获得完整超时时间。当前推荐 A，但未确认。
+2. 非 2xx 默认行为：`A` 节点标记失败但可配置继续下游分析；`B` 始终终止当前流程。当前推荐 A，但未确认。
+3. Binary：`A` 先隐藏，等文件变量与 Artifact 协议完成后开放；`B` 立即实现本机文件上传。当前推荐 A，但未确认。
+4. 配置覆盖层级：系统默认、Run 参数和节点参数之间的优先级尚未确认；不得自行定义覆盖关系。
+
+#### 初步开发拆分（确认范围后执行）
+
+| 子任务 | 目标 | 输入 / 输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 22.3.1 | 超时与重试内核 | 节点/Run 配置；尝试记录与最终结果 | 本地慢服务、连接失败、超时、中断、非重试业务响应 | 待确认决策 1、4 |
+| 22.3.2 | Body 协议真实性 | 四类 Body 配置；真实 HTTP 报文 | 本地 Mock 验证 Content-Type、原始字节、multipart 边界和变量替换 | 待确认决策 3 |
+| 22.3.3 | 失败响应策略 | 非 2xx 原始响应；状态与继续策略 | 400/401/422/500 节点与下游变量 E2E | 待确认决策 2、真实 DAG 执行语义 |
+| 22.3.4 | 大响应 Artifact | 完整响应；Artifact 元数据、预览和提取结果 | 大 JSON/文本/二进制响应、清理、恢复和浏览器性能测试 | Artifact 契约 |
+| 22.3.5 | 凭据与网络选项 | credential_id、代理/TLS/CA/重定向 | 密钥脱敏、三代理模式、自签名 HTTPS 和导入导出测试 | 22.1、22.2 |
+| 22.3.6 | 集成回归 | 完整 HTTP 节点业务流程 | 单元测试、构建、静态检查、桌面浏览器 E2E、全量回归 | 22.3.1-22.3.5 中本期范围 |
+
+#### 候选验收标准（How to Measure）
+
+- 页面展示的每个运行配置都必须被后端消费并能从运行记录证明生效，不允许继续存在“可填写但无执行语义”的控件。
+- 连接失败/超时与收到 HTTP 响应必须可区分；重试次数、等待时间和最终状态可追溯，业务响应不会被默认重复调用。
+- RAW、JSON、URL encoded、multipart 和未来 Binary 的页面名称、Content-Type、真实报文及日志一致。
+- 非 2xx 响应原文和结构化字段不会丢失，是否继续执行遵循已确认策略。
+- 大响应不直接无限制进入 SQLite 和浏览器，但完整原文仍可回溯，变量提取结果不受预览限制。
+- HTTP 节点优化不得把 Run 调度、SCRIPT 断言或 AGENT 质量判断重新耦合进节点内部。
+
+#### 调研来源
+
+- Dify HTTP Request: <https://docs.dify.ai/en/cloud/use-dify/nodes/http-request>
+- n8n HTTP Request: <https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest>
+- Azure Logic Apps error handling and retry policies: <https://learn.microsoft.com/en-us/azure/logic-apps/error-exception-handling>
+- Postman request settings: <https://learning.postman.com/docs/use/send-requests/create-requests/request-settings/>
+
+### 22.5 DeepSeek `deepseek-v4-pro` LLM 节点高级参数实测（completed，2026-07-23）
+
+#### 业务背景与验收口径
+
+- Why：企业测试工程师需要在 Workflow LLM 节点直接覆盖模型请求参数，并能从节点日志确认参数确实进入请求、模型成功响应以及 token 消耗，避免仅依据供应商文档声明可用。
+- Who / Where：本机 Agent Bench `http://127.0.0.1:8010/`，模型管理中的 `DeppSeek / deepseek-v4-pro`，专用 Workflow `deepseek-v4-pro 高级参数验证`（ID `93fb7ecc003043ae942d6d605cdcbeea`）及 LLM 节点 `LLM_mrwdl894_rmnsw`。
+- What / When：按用户确认的 `1A / 2A / 3A` 执行广泛兼容矩阵；请求字段进入实际 Body、节点成功且响应结构合理即记为“接口接受”，存在可观察语义时再单独证明生效。该 live 结果只代表 2026-07-23 当前供应商端点，不固化为跨模型通用契约。
+- How to Measure：逐次通过高级参数 JSON 框保存并运行，核对持久化日志中的 `request_body / response_body / usage / error`；使用 JSON 输出、logprobs、工具调用、thinking 开关、stop 截断和流式 usage 作为可观察语义验证。
+
+#### Live 矩阵结果
+
+| 参数 / 组合 | 结果 | 可观察证据与边界 |
+|---|---|---|
+| `{}` | SUCCESS | 基线输出 `OK`，usage 完整 |
+| `temperature / top_p / max_tokens / frequency_penalty / presence_penalty / stop` | 接受 | 全部进入请求；`max_tokens: 16` 将完成 token 限制为 16，`stop: ["XYZ"]` 将 `ABCXYZ` 截断为 `ABC` |
+| `response_format: {"type":"json_object"}` | 生效 | 返回合法 JSON `{"result":"OK"}` |
+| `logprobs: true / top_logprobs: 2` | 生效 | 阻塞响应包含逐 token `logprob` 与两个候选 `top_logprobs`，包括 reasoning token |
+| `tools / tool_choice: "auto"` | 生效 | 返回 `finish_reason: "tool_calls"` 和 `get_weather({"city":"北京"})` |
+| `tool_choice: "required"` | 有条件生效 | 默认 thinking 模式返回 HTTP 400 `Thinking mode does not support this tool_choice`；同时设置 `thinking.type: "disabled"` 后成功返回工具调用 |
+| `thinking: {"type":"enabled"}` | 生效 | 响应包含 `reasoning_content` 与 `reasoning_tokens` |
+| `thinking: {"type":"disabled"}` | 生效 | `reasoning_content` 为 null，短提示只消耗 1 completion token |
+| `max_completion_tokens` | 接受 | `max_completion_tokens: 16` 请求成功并返回结构化 usage |
+| `stream_options: {"include_usage":true}` | 生效 | 必须配合右侧“流式输出”开关；最终 SSE chunk 包含 usage。流式 response 仍保留原始 SSE，同时从 usage 事件提取并持久化顶层 `usage` 供日志展示 |
+| `n` | 仅支持 1 | `n: 1` 成功；`n: 2` 返回 HTTP 400 `currently only n = 1 is supported` |
+| `seed / user` | 接受但无法证明生效 | 请求成功且字段进入 Body；当前响应没有足以证明语义生效的信号 |
+| `enable_thinking: false` | 接受但未生效 | 请求成功，但响应仍包含 reasoning 且 32 个 completion token 全为 reasoning；不得用它替代 `thinking.type: "disabled"` |
+| `reasoning_effort: "low"` | 接受但无法证明生效 | 请求成功，但仍生成完整 reasoning；没有观察到可区分效果 |
+| `top_k / min_p / repetition_penalty` | 接受但无法证明生效 | 组合请求成功；供应商会静默接受未知字段，因此不能据此宣称采样语义已实现 |
+| 未知字段对照 | 被静默接受 | `definitely_not_a_real_parameter: true` 仍 SUCCESS，证明“HTTP 成功”只能说明网关接受，不能单独证明字段被模型消费 |
+
+#### 结论与保留状态
+
+- 已直接观察到语义生效的参数：`max_tokens`、`stop`、`response_format`、`logprobs`、`top_logprobs`、`tools`、`tool_choice`、`thinking`、`stream_options`。官方候选 `temperature`、`top_p`、`frequency_penalty`、`presence_penalty` 和兼容字段 `max_completion_tokens` 均被当前端点接受，但本轮没有为每个采样参数建立统计显著的独立效果证明。
+- `stream` 不属于高级参数框的可编辑字段，画布右侧“流式输出”开关是唯一入口；节点保存时由平台写入最终请求。
+- 不推荐依赖 `enable_thinking`、`reasoning_effort`、`top_k`、`min_p`、`repetition_penalty`、`seed` 或 `user`，除非后续增加能证明实际语义的对照测试。
+- 专用 Workflow 和最近 10 条节点运行日志已保留；节点当前停在已验证的非流式配置 `thinking.disabled + temperature 0 + top_p 0.8 + max_tokens 128`。节点历史上限固定为 10，完整矩阵以本节为长期记录。
+- 官方候选参数来源：DeepSeek Chat Completion 文档 <https://api-docs.deepseek.com/api/create-chat-completion>。
+
+### 22.6 LLM JSON 参考示例与格式化（completed，2026-07-23）
+
+- Why：企业测试人员需要在 LLM 节点和模型默认 Body 中快速识别常用 DeepSeek 参数，但参考内容不能自动改变模型行为、token 成本或已保存配置。
+- Who / Where：Workflow LLM 节点“高级参数”编辑器，以及模型管理单模型“默认 Body JSON”配置弹窗。
+- What / When：按用户确认的 `1A / 2C / 3A`，两处空编辑器只显示同一组浅色斜体 placeholder；用户输入后参考内容自动消失，不写入状态、不参与请求。两处右上角均提供 Beautify，合法 JSON 对象格式化为两空格缩进，无效 JSON 保留原文并显示错误。
+- 模型配置弹窗保持原有 `560px` 宽度，默认 Body 编辑区通过更高优先级样式固定最小高度 `280px`，解决通用 `.input` 将其压缩至 `42px` 最小高度的问题；实测整张弹窗高度为 `542px`，桌面视口内无溢出。
+- Workflow LLM 节点高级参数正文同步提升至最小高度 `280px`（含 `34px` 工具栏的编辑器整体最小高度 `314px`）；实测正文 `280px`、整体含边框 `316px`，与运行配置间隔 `43px`，节点编辑器内部滚动且无模块重叠。
+- 验收：空 LLM 参数只显示参考值；输入后 placeholder 消失；两处 Beautify 均完成真实页面格式化；无效 JSON 分别显示“高级参数不是合法 JSON”和“默认 Body 不是合法 JSON”；取消弹窗和重载 Workflow 后，模型默认 Body 与节点参数均保持原持久化值。
+
+### 22.7 节点日志请求/响应标题与流式 token（completed，2026-07-23）
+
+- Why：节点调试需要快速区分完整 request/response 并直接复制；LLM 流式运行此前固定保存 `usage=None`，日志行无法显示实际 token 消耗。
+- Who / Where：桌面 Workflow Studio 中展开 HTTP、LLM 或其他业务节点的单次运行日志；LLM 用户同时覆盖 OpenAI-compatible 与 Anthropic 协议的流式调用。
+- What / When：请求/响应标题统一为 `request / response`，标题字号与日志行时间同为 `14px`，标题行最右侧提供复制完整内容的图标按钮。OpenAI-compatible 流式请求由平台写入 `stream_options.include_usage=true`；流结束后从 OpenAI usage 事件或 Anthropic `message_start / message_delta` 事件合并 usage 并持久化。
+- 边界：流式 response 仍保存并展示脱敏后的原始 SSE，不提取流式输出变量；usage 解析失败或供应商未返回 usage 时保持 `None`，不把估算值冒充真实 token。历史记录若 `usage` 为空但原始 SSE 含 usage，前端只为展示提取该真实值，不回写或改造历史数据。
+- 验收：HTTP 与 LLM 日志均显示 `request / response`、复制按钮位于标题最右侧且复制完整正文；OpenAI 流式运行记录保存 `total_tokens`，Anthropic 保存合并后的 `input_tokens / output_tokens`，前端日志行显示对应 token 总数。

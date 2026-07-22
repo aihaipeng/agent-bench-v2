@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from web.routes_config import router as config_router
 from web.routes_excel import router as excel_router
 from web.routes_files import router as files_router
+from web.routes_local_clipboard import router as local_clipboard_router
 from web.routes_model_providers import router as model_providers_router
 from web.routes_testcases import router as testcases_router
 from web.routes_targets import router as targets_router
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     app.include_router(excel_router)
     app.include_router(config_router)
     app.include_router(files_router)
+    app.include_router(local_clipboard_router)
     app.include_router(model_providers_router)
     app.include_router(testcases_router)
     app.include_router(targets_router)

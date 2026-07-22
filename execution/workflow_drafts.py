@@ -152,6 +152,7 @@ class WorkflowNodeRunRecord(_WorkflowModel):
     output: Any = None
     stdout: str = ""
     stderr: str = ""
+    console: str = ""
     response_body: str = ""
     output_variables: dict[str, Any] = Field(default_factory=dict)
     usage: dict[str, Any] | None = None
@@ -216,6 +217,7 @@ class WorkflowDraftRepository:
                         output_json TEXT NOT NULL,
                         stdout_body TEXT NOT NULL DEFAULT '',
                         stderr_body TEXT NOT NULL DEFAULT '',
+                        console_body TEXT NOT NULL DEFAULT '',
                         response_body TEXT NOT NULL DEFAULT '',
                         output_variables_json TEXT NOT NULL DEFAULT '{}',
                         usage_json TEXT,
@@ -253,6 +255,11 @@ class WorkflowDraftRepository:
                     connection.execute(
                         "ALTER TABLE workflow_node_runs "
                         "ADD COLUMN stderr_body TEXT NOT NULL DEFAULT ''"
+                    )
+                if "console_body" not in columns:
+                    connection.execute(
+                        "ALTER TABLE workflow_node_runs "
+                        "ADD COLUMN console_body TEXT NOT NULL DEFAULT ''"
                     )
                 if "output_variables_json" not in columns:
                     connection.execute(
@@ -325,6 +332,34 @@ class WorkflowDraftRepository:
             raise WorkflowDraftRepositoryError(f"Workflow 草稿不存在: {record.id}")
         return record
 
+    def update_metadata(
+        self,
+        workflow_id: str,
+        *,
+        name: str,
+        description: str,
+    ) -> WorkflowDraftRecord:
+        """只更新 Workflow 名称和说明，不重新校验或改写画布图。"""
+        updated_at = utc_now_iso()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE workflow_drafts
+                SET name = ?, description = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (name, description, updated_at, workflow_id),
+            )
+            if cursor.rowcount == 0:
+                raise WorkflowDraftRepositoryError(
+                    f"Workflow 草稿不存在: {workflow_id}"
+                )
+            row = connection.execute(
+                "SELECT * FROM workflow_drafts WHERE id = ?", (workflow_id,)
+            ).fetchone()
+            connection.commit()
+        return self._draft_from_row(row)
+
     def delete_draft(self, workflow_id: str) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -343,10 +378,10 @@ class WorkflowDraftRepository:
                         id, workflow_id, node_id, status, started_at, finished_at,
                         duration_ms, provider_name, model_name, input_snapshot_json,
                         request_body_json, events_json, output_json,
-                        stdout_body, stderr_body, response_body,
+                        stdout_body, stderr_body, console_body, response_body,
                         output_variables_json, usage_json, error_json, http_status,
                         request_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     self._run_values(values),
                 )
@@ -366,7 +401,7 @@ class WorkflowDraftRepository:
                     status = ?, finished_at = ?, duration_ms = ?, provider_name = ?,
                     model_name = ?, input_snapshot_json = ?, request_body_json = ?,
                     events_json = ?, output_json = ?, stdout_body = ?,
-                    stderr_body = ?, response_body = ?,
+                    stderr_body = ?, console_body = ?, response_body = ?,
                     output_variables_json = ?, usage_json = ?, error_json = ?,
                     http_status = ?, request_id = ?
                 WHERE id = ? AND workflow_id = ? AND node_id = ?
@@ -377,7 +412,7 @@ class WorkflowDraftRepository:
                     _json_dump(values["input_snapshot"]),
                     _json_dump(values["request_body"]), _json_dump(values["events"]),
                     _json_dump(values["output"]), values["stdout"], values["stderr"],
-                    values["response_body"],
+                    values["console"], values["response_body"],
                     _json_dump(values["output_variables"]),
                     _json_dump_optional(values["usage"]),
                     _json_dump_optional(values["error"]), values["http_status"],
@@ -446,7 +481,10 @@ class WorkflowDraftRepository:
 
     @staticmethod
     def _draft_from_row(row: sqlite3.Row) -> WorkflowDraftRecord:
-        return WorkflowDraftRecord(
+        # Persisted drafts may predate the current node contract. Restore them
+        # without revalidating so users can open and correct them; all writes
+        # and executions still pass through current validation.
+        return WorkflowDraftRecord.model_construct(
             id=row["id"], name=row["name"], description=row["description"],
             nodes=json.loads(row["nodes_json"]), edges=json.loads(row["edges_json"]),
             global_variables=json.loads(row["global_variables_json"]),
@@ -461,7 +499,8 @@ class WorkflowDraftRepository:
             values["duration_ms"], values["provider_name"], values["model_name"],
             _json_dump(values["input_snapshot"]), _json_dump(values["request_body"]),
             _json_dump(values["events"]), _json_dump(values["output"]),
-            values["stdout"], values["stderr"], values["response_body"],
+            values["stdout"], values["stderr"], values["console"],
+            values["response_body"],
             _json_dump(values["output_variables"]),
             _json_dump_optional(values["usage"]), _json_dump_optional(values["error"]),
             values["http_status"], values["request_id"],
@@ -478,6 +517,7 @@ class WorkflowDraftRepository:
             request_body=json.loads(row["request_body_json"]),
             events=json.loads(row["events_json"]), output=json.loads(row["output_json"]),
             stdout=row["stdout_body"], stderr=row["stderr_body"],
+            console=row["console_body"],
             response_body=row["response_body"],
             output_variables=json.loads(row["output_variables_json"]),
             usage=_json_load_optional(row["usage_json"]),

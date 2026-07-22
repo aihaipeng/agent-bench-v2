@@ -77,6 +77,7 @@ def _finished_run(workflow_id: str, sequence: int) -> WorkflowNodeRunRecord:
         output={"answer": sequence},
         stdout=f"stdout-{sequence}\n",
         stderr=f"stderr-{sequence}\n",
+        console=f"stdout-{sequence}\nstderr-{sequence}\n",
         usage={"total_tokens": sequence},
         http_status=200,
         request_id=f"request-{sequence}",
@@ -111,6 +112,7 @@ def test_workflow_draft_repository_restart_retention_and_cascade(tmp_path):
     assert runs[0].output == {"answer": 10}
     assert runs[0].stdout == "stdout-10\n"
     assert runs[0].stderr == "stderr-10\n"
+    assert runs[0].console == "stdout-10\nstderr-10\n"
 
     assert restarted.delete_draft(workflow.id) is True
     assert restarted.list_node_runs(workflow.id, "llm-1") == []
@@ -236,6 +238,41 @@ def test_workflow_draft_api_rejects_isolated_nodes_and_cycles(
         assert "游离脚本" in response.text
 
 
+def test_metadata_update_preserves_invalid_graph_and_rejects_blank_name(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_database(tmp_path, monkeypatch)
+    body = _graph_body()
+    body["edges"] = []
+    client = TestClient(app)
+    created = client.post(
+        "/api/workflow-drafts?for_node_run=true",
+        json=body,
+    ).json()["workflow"]
+
+    updated = client.patch(
+        f"/api/workflow-drafts/{created['id']}/metadata",
+        json={"name": "  新名称  ", "description": "  新说明  "},
+    )
+
+    assert updated.status_code == 200
+    workflow = updated.json()["workflow"]
+    assert workflow["name"] == "新名称"
+    assert workflow["description"] == "新说明"
+    assert workflow["nodes"] == created["nodes"]
+    assert workflow["edges"] == []
+    assert workflow["global_variables"] == created["global_variables"]
+    assert client.patch(
+        f"/api/workflow-drafts/{created['id']}/metadata",
+        json={"name": "   ", "description": ""},
+    ).status_code == 422
+    assert client.patch(
+        "/api/workflow-drafts/missing/metadata",
+        json={"name": "不存在", "description": ""},
+    ).status_code == 404
+
+
 def test_workflow_draft_accepts_single_node_without_system_nodes(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     body = _graph_body()
@@ -337,7 +374,7 @@ def test_workflow_draft_rejects_unknown_output_variable_type(tmp_path, monkeypat
     assert "不支持的输出变量类型: DATE" in response.text
 
 
-def test_parallel_branches_are_valid_but_conflicting_outputs_are_rejected(tmp_path, monkeypatch):
+def test_parallel_branches_with_equal_distance_outputs_are_rejected(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     base_node = _graph_body()["nodes"][0]
     left = json.loads(json.dumps(base_node))
@@ -373,7 +410,81 @@ def test_parallel_branches_are_valid_but_conflicting_outputs_are_rejected(tmp_pa
     client = TestClient(app)
     merged = client.post("/api/workflow-drafts", json=isolated)
     assert merged.status_code == 422
-    assert "变量名冲突: same" in merged.text
+    assert "变量名等距冲突: same (Left / Right)" in merged.text
+
+
+def test_linear_duplicate_output_names_allow_nearest_ancestor_override(
+    tmp_path, monkeypatch
+):
+    _patch_database(tmp_path, monkeypatch)
+    base_node = _graph_body()["nodes"][0]
+    nodes = []
+    for node_id, label, node_type in (
+        ("start", "开始", "START"),
+        ("far", "Far", "HTTP"),
+        ("near", "Near", "HTTP"),
+        ("end", "结束", "END"),
+    ):
+        node = json.loads(json.dumps(base_node))
+        node["id"] = node_id
+        node["data"]["label"] = label
+        node["data"]["nodeType"] = node_type
+        node["data"]["outputVariables"] = (
+            [{"id": f"output-{node_id}", "name": "same", "value": "response.result"}]
+            if node_type == "HTTP"
+            else []
+        )
+        nodes.append(node)
+    body = {
+        "name": "nearest override",
+        "description": "",
+        "nodes": nodes,
+        "edges": [
+            {"id": "start-far", "source": "start", "target": "far"},
+            {"id": "far-near", "source": "far", "target": "near"},
+            {"id": "near-end", "source": "near", "target": "end"},
+        ],
+        "global_variables": [],
+    }
+
+    response = TestClient(app).post("/api/workflow-drafts", json=body)
+
+    assert response.status_code == 200
+
+
+def test_legacy_script_mapping_is_optional_and_does_not_block_execution(
+    tmp_path, monkeypatch
+):
+    database_path = _patch_database(tmp_path, monkeypatch)
+    body = _graph_body(name="legacy script mapping")
+    body["nodes"][0]["data"]["nodeType"] = "SCRIPT"
+    body["nodes"][0]["data"]["outputVariables"] = [
+        {"id": "legacy", "name": "message", "value": "response.message"}
+    ]
+    historical = WorkflowDraftRecord.model_construct(
+        id="legacy-script",
+        created_at="2026-07-22T00:00:00Z",
+        updated_at="2026-07-22T00:00:00Z",
+        **body,
+    )
+    WorkflowDraftRepository(database_path).create_draft(historical)
+    client = TestClient(app)
+
+    listed = client.get("/api/workflow-drafts")
+    loaded = client.get("/api/workflow-drafts/legacy-script")
+    saved = client.put("/api/workflow-drafts/legacy-script", json=body)
+    executed = client.post(
+        "/api/workflow-drafts/legacy-script/nodes/llm-1/runs"
+    )
+
+    assert listed.status_code == 200
+    assert loaded.status_code == 200
+    assert saved.status_code == 200
+    assert executed.status_code == 200
+    run = executed.json()["run"]
+    assert run["status"] == "SUCCESS"
+    assert run["output_variables"] == {"message": None}
+    assert "输出 null: message" in run["console"]
 
 
 def test_variable_groups_skip_ancestors_without_output_mappings(tmp_path, monkeypatch):

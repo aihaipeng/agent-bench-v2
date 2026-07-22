@@ -319,6 +319,33 @@ def parse_anthropic_response(response: httpx.Response) -> dict[str, Any]:
     }
 
 
+def extract_streaming_usage(body: str) -> dict[str, Any] | None:
+    """Collect usage fields from OpenAI-compatible or Anthropic SSE events."""
+
+    usage: dict[str, Any] = {}
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = httpx.Response(200, content=data).json()
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        candidates = [payload.get("usage")]
+        message = payload.get("message")
+        if isinstance(message, dict):
+            candidates.append(message.get("usage"))
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                usage.update(deepcopy(candidate))
+    return usage or None
+
+
 def _parse_streaming_response(body: str) -> dict[str, Any]:
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
