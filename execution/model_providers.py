@@ -9,10 +9,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from execution.targets import DEFAULT_DATABASE_PATH
 
@@ -31,8 +32,29 @@ class ModelProviderProtocol(str, Enum):
     MANUAL = "MANUAL"
 
 
+class ModelProviderProxyMode(str, Enum):
+    SYSTEM = "SYSTEM"
+    DIRECT = "DIRECT"
+    CUSTOM = "CUSTOM"
+
+
 class _ModelProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+
+class ModelRuntimeConfiguration(_ModelProviderModel):
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    default_body: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("default_body")
+    @classmethod
+    def validate_default_body(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("模型默认 Body 必须是合法 JSON 对象") from exc
+        return value
 
 
 class ModelProviderConfiguration(_ModelProviderModel):
@@ -41,8 +63,14 @@ class ModelProviderConfiguration(_ModelProviderModel):
     api_key: str = Field(min_length=1, max_length=4096)
     base_url: str = Field(min_length=1, max_length=2048)
     protocol: ModelProviderProtocol
+    proxy_mode: ModelProviderProxyMode = ModelProviderProxyMode.SYSTEM
+    proxy_url: str | None = Field(default=None, max_length=2048)
+    proxy_username: str | None = Field(default=None, max_length=512)
+    proxy_password: str | None = Field(default=None, max_length=4096)
+    skip_ssl_verify: bool = False
     model_endpoint: str | None = Field(default=None, max_length=2048)
     models: list[str] = Field(min_length=1, max_length=500)
+    model_configs: dict[str, ModelRuntimeConfiguration] = Field(default_factory=dict)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -61,6 +89,39 @@ class ModelProviderConfiguration(_ModelProviderModel):
         if not normalized:
             return None
         return _validate_http_url(normalized, "URL")
+
+    @field_validator("proxy_url", mode="before")
+    @classmethod
+    def normalize_proxy_url(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().rstrip("/")
+        if not normalized:
+            return None
+        parsed = urlsplit(normalized)
+        if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+            raise ValueError("代理 URL 只支持 HTTP(S) 或 SOCKS5")
+        if (
+            not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("代理 URL 格式无效")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("代理 URL 端口无效") from exc
+        return normalized
+
+    @field_validator("proxy_username", "proxy_password", mode="before")
+    @classmethod
+    def normalize_proxy_credentials(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
     @field_validator("api_key")
     @classmethod
@@ -96,6 +157,24 @@ class ModelProviderConfiguration(_ModelProviderModel):
             raise ValueError("至少添加一个模型")
         return models
 
+    @model_validator(mode="after")
+    def validate_connection_and_model_configs(self) -> "ModelProviderConfiguration":
+        if self.protocol == ModelProviderProtocol.MANUAL:
+            raise ValueError("模型协议只支持 OPENAI_COMPATIBLE 或 ANTHROPIC")
+        if self.proxy_mode == ModelProviderProxyMode.CUSTOM:
+            if not self.proxy_url:
+                raise ValueError("自定义代理模式必须填写代理 URL")
+            if self.proxy_password and not self.proxy_username:
+                raise ValueError("填写代理密码时必须同时填写用户名")
+        else:
+            self.proxy_url = None
+            self.proxy_username = None
+            self.proxy_password = None
+        unknown_models = sorted(set(self.model_configs) - set(self.models))
+        if unknown_models:
+            raise ValueError("模型配置引用了未添加模型: " + ", ".join(unknown_models))
+        return self
+
 
 class ModelProviderRecord(ModelProviderConfiguration):
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
@@ -109,6 +188,7 @@ class ModelProviderSummary(_ModelProviderModel):
     website_url: str | None
     base_url: str
     protocol: ModelProviderProtocol
+    proxy_mode: ModelProviderProxyMode
     model_endpoint: str | None
     models: list[str]
     created_at: str
@@ -116,7 +196,19 @@ class ModelProviderSummary(_ModelProviderModel):
 
     @classmethod
     def from_record(cls, record: ModelProviderRecord) -> "ModelProviderSummary":
-        return cls(**record.model_dump(mode="json", exclude={"api_key"}))
+        return cls(
+            **record.model_dump(
+                mode="json",
+                exclude={
+                    "api_key",
+                    "proxy_url",
+                    "proxy_username",
+                    "proxy_password",
+                    "skip_ssl_verify",
+                    "model_configs",
+                },
+            )
+        )
 
 
 class ModelProviderRepositoryError(RuntimeError):
@@ -169,13 +261,49 @@ class ModelProviderRepository:
                         api_key TEXT NOT NULL,
                         base_url TEXT NOT NULL,
                         protocol TEXT NOT NULL,
+                        proxy_mode TEXT NOT NULL DEFAULT 'SYSTEM',
+                        proxy_url TEXT,
+                        proxy_username TEXT,
+                        proxy_password TEXT,
+                        skip_ssl_verify INTEGER NOT NULL DEFAULT 0,
                         model_endpoint TEXT,
                         models_json TEXT NOT NULL,
+                        model_configs_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
                     """
                 )
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(model_providers)"
+                    ).fetchall()
+                }
+                if "proxy_mode" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN proxy_mode TEXT NOT NULL DEFAULT 'SYSTEM'"
+                    )
+                if "proxy_url" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN proxy_url TEXT"
+                    )
+                if "proxy_username" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN proxy_username TEXT"
+                    )
+                if "proxy_password" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN proxy_password TEXT"
+                    )
+                if "skip_ssl_verify" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN skip_ssl_verify INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "model_configs_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE model_providers ADD COLUMN model_configs_json TEXT NOT NULL DEFAULT '{}'"
+                    )
                 connection.commit()
             self._initialized = True
 
@@ -187,14 +315,20 @@ class ModelProviderRepository:
                     """
                     INSERT INTO model_providers(
                         id, name, website_url, api_key, base_url, protocol,
-                        model_endpoint, models_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        proxy_mode, proxy_url, proxy_username, proxy_password,
+                        skip_ssl_verify, model_endpoint, models_json,
+                        model_configs_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         values["id"], values["name"], values["website_url"],
                         values["api_key"], values["base_url"], values["protocol"],
+                        values["proxy_mode"], values["proxy_url"],
+                        values["proxy_username"], values["proxy_password"],
+                        int(values["skip_ssl_verify"]),
                         values["model_endpoint"],
                         json.dumps(values["models"], ensure_ascii=False),
+                        json.dumps(values["model_configs"], ensure_ascii=False),
                         values["created_at"], values["updated_at"],
                     ),
                 )
@@ -224,13 +358,19 @@ class ModelProviderRepository:
                 """
                 UPDATE model_providers
                 SET name = ?, website_url = ?, api_key = ?, base_url = ?,
-                    protocol = ?, model_endpoint = ?, models_json = ?, updated_at = ?
+                    protocol = ?, proxy_mode = ?, proxy_url = ?, model_endpoint = ?,
+                    proxy_username = ?, proxy_password = ?, skip_ssl_verify = ?,
+                    models_json = ?, model_configs_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     values["name"], values["website_url"], values["api_key"],
-                    values["base_url"], values["protocol"], values["model_endpoint"],
+                    values["base_url"], values["protocol"], values["proxy_mode"],
+                    values["proxy_url"], values["model_endpoint"],
+                    values["proxy_username"], values["proxy_password"],
+                    int(values["skip_ssl_verify"]),
                     json.dumps(values["models"], ensure_ascii=False),
+                    json.dumps(values["model_configs"], ensure_ascii=False),
                     values["updated_at"], values["id"],
                 ),
             )
@@ -263,7 +403,12 @@ class ModelProviderRepository:
         return ModelProviderRecord(
             id=row["id"], name=row["name"], website_url=row["website_url"],
             api_key=row["api_key"], base_url=row["base_url"],
-            protocol=row["protocol"], model_endpoint=row["model_endpoint"],
+            protocol=row["protocol"], proxy_mode=row["proxy_mode"],
+            proxy_url=row["proxy_url"], proxy_username=row["proxy_username"],
+            proxy_password=row["proxy_password"],
+            skip_ssl_verify=bool(row["skip_ssl_verify"]),
+            model_endpoint=row["model_endpoint"],
             models=json.loads(row["models_json"]), created_at=row["created_at"],
+            model_configs=json.loads(row["model_configs_json"]),
             updated_at=row["updated_at"],
         )

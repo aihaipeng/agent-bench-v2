@@ -25,9 +25,15 @@ from execution import (
     WorkflowNodeRunRecord,
     WorkflowNodeRunStatus,
     ModelProviderRepository,
+    anthropic_headers,
+    anthropic_messages_url,
+    build_anthropic_request,
     build_chat_completion_request,
     chat_completions_url,
+    invoke_anthropic,
     invoke_openai_compatible,
+    model_http_client_options,
+    parse_anthropic_response,
     parse_openai_compatible_response,
     redact_sensitive_text,
     resolve_prompt_template,
@@ -270,7 +276,7 @@ def _provider_request_id(headers: Any) -> str | None:
     return None
 
 
-def _response_error_message(response, api_key: str) -> str:
+def _response_error_message(response, *secrets: str | None) -> str:
     try:
         payload = response.json()
         detail = json.dumps(payload, ensure_ascii=False, allow_nan=False)
@@ -278,8 +284,23 @@ def _response_error_message(response, api_key: str) -> str:
         detail = response.text
     return redact_sensitive_text(
         f"模型供应商返回 HTTP {response.status_code}: {detail}",
-        api_key,
+        *secrets,
     )
+
+
+def _provider_request_options(provider) -> dict[str, Any]:
+    return {
+        "proxy_mode": provider.proxy_mode,
+        "proxy_url": provider.proxy_url,
+        "proxy_username": provider.proxy_username,
+        "proxy_password": provider.proxy_password,
+        "skip_ssl_verify": provider.skip_ssl_verify,
+    }
+
+
+def _model_default_body(provider, model_name: str) -> dict[str, Any]:
+    configuration = provider.model_configs.get(model_name)
+    return configuration.default_body if configuration is not None else {}
 
 
 def _json_text(value: Any) -> str:
@@ -649,35 +670,54 @@ async def _run_node_without_registry(
         provider = ModelProviderRepository(DATABASE_PATH).get(provider_id)
         if provider is None or model_name not in provider.models:
             raise ValueError("模型已失效")
-        if provider.protocol != "OPENAI_COMPATIBLE":
-            raise ValueError(f"当前节点执行不支持协议: {provider.protocol}")
         api_key = provider.api_key
         provider_name = provider.name or "未命名供应商"
-        messages: list[dict[str, str]] = []
-        if resolved_system_prompt.strip():
-            messages.append({"role": "system", "content": resolved_system_prompt})
-        messages.append({"role": "user", "content": resolved_user_prompt})
-        request_body = build_chat_completion_request(
-            model_name=model_name,
-            messages=messages,
-            model_parameters=resolved_model_parameters,
-        )
+        user_messages = [{"role": "user", "content": resolved_user_prompt}]
+        model_defaults = _model_default_body(provider, model_name)
+        if provider.protocol == "ANTHROPIC":
+            request_body = build_anthropic_request(
+                model_name=model_name,
+                messages=user_messages,
+                system_prompt=resolved_system_prompt,
+                model_defaults=model_defaults,
+                model_parameters=resolved_model_parameters,
+            )
+            invoke = invoke_anthropic
+            parse = parse_anthropic_response
+        elif provider.protocol == "OPENAI_COMPATIBLE":
+            messages = list(user_messages)
+            if resolved_system_prompt.strip():
+                messages.insert(0, {"role": "system", "content": resolved_system_prompt})
+            request_body = build_chat_completion_request(
+                model_name=model_name,
+                messages=messages,
+                model_defaults=model_defaults,
+                model_parameters=resolved_model_parameters,
+            )
+            invoke = invoke_openai_compatible
+            parse = lambda target: parse_openai_compatible_response(
+                target, stream=False
+            )
+        else:
+            raise ValueError(f"当前节点执行不支持协议: {provider.protocol}")
         events.append(_event("INFO", f"请求模型 {provider_name} / {model_name}"))
-        response = await invoke_openai_compatible(
+        response = await invoke(
             base_url=provider.base_url,
             api_key=api_key,
             request_body=request_body,
+            **_provider_request_options(provider),
         )
         request_id = _provider_request_id(response.headers)
         http_status = response.status_code
-        response_body = redact_sensitive_text(response.text, api_key)
+        response_body = redact_sensitive_text(
+            response.text, api_key, provider.proxy_password
+        )
         events.append(_event("INFO", f"供应商返回 HTTP {response.status_code}"))
         if not response.is_success:
-            raise RuntimeError(_response_error_message(response, api_key))
-        parsed = parse_openai_compatible_response(
-            response,
-            stream=False,
-        )
+            raise RuntimeError(
+                _response_error_message(response, api_key, provider.proxy_password)
+            )
+        parsed = parse(response)
         native_response = response.json()
         output_variables = extract_output_variables(
             node,
@@ -722,7 +762,8 @@ async def _run_node_without_registry(
             }
         )
     except Exception as exc:
-        message = redact_sensitive_text(str(exc), api_key)
+        proxy_password = provider.proxy_password if "provider" in locals() else None
+        message = redact_sensitive_text(str(exc), api_key, proxy_password)
         events.append(_event("ERROR", message))
         completed = running.model_copy(
             update={
@@ -740,7 +781,9 @@ async def _run_node_without_registry(
                 "error": {
                     "type": type(exc).__name__,
                     "message": message,
-                    "traceback": redact_sensitive_text(traceback.format_exc(), api_key),
+                    "traceback": redact_sensitive_text(
+                        traceback.format_exc(), api_key, proxy_password
+                    ),
                 },
             }
         )
@@ -850,37 +893,60 @@ async def stream_llm_node(
             provider = ModelProviderRepository(DATABASE_PATH).get(provider_id)
             if provider is None or model_name not in provider.models:
                 raise ValueError("模型已失效")
-            if provider.protocol != "OPENAI_COMPATIBLE":
-                raise ValueError(f"当前节点执行不支持协议: {provider.protocol}")
             api_key = provider.api_key
             provider_name = provider.name or "未命名供应商"
-            messages: list[dict[str, str]] = []
-            if resolved_system_prompt.strip():
-                messages.append({"role": "system", "content": resolved_system_prompt})
-            messages.append({"role": "user", "content": resolved_user_prompt})
-            request_body = build_chat_completion_request(
-                model_name=model_name,
-                messages=messages,
-                model_parameters=resolved_model_parameters,
-            )
+            user_messages = [{"role": "user", "content": resolved_user_prompt}]
+            model_defaults = _model_default_body(provider, model_name)
+            if provider.protocol == "ANTHROPIC":
+                request_body = build_anthropic_request(
+                    model_name=model_name,
+                    messages=user_messages,
+                    system_prompt=resolved_system_prompt,
+                    model_defaults=model_defaults,
+                    model_parameters=resolved_model_parameters,
+                )
+                request_url = anthropic_messages_url(provider.base_url)
+                request_headers = anthropic_headers(api_key)
+            elif provider.protocol == "OPENAI_COMPATIBLE":
+                messages = list(user_messages)
+                if resolved_system_prompt.strip():
+                    messages.insert(0, {"role": "system", "content": resolved_system_prompt})
+                request_body = build_chat_completion_request(
+                    model_name=model_name,
+                    messages=messages,
+                    model_defaults=model_defaults,
+                    model_parameters=resolved_model_parameters,
+                )
+                request_url = chat_completions_url(provider.base_url)
+                request_headers = {
+                    "accept": "application/json",
+                    "authorization": f"Bearer {api_key}",
+                    "content-type": "application/json",
+                }
+            else:
+                raise ValueError(f"当前节点执行不支持协议: {provider.protocol}")
             events.append(_event("INFO", f"流式请求模型 {provider_name} / {model_name}"))
             original_parts: list[str] = []
-            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+            async with httpx.AsyncClient(
+                **model_http_client_options(
+                    provider.base_url,
+                    timeout_seconds=120,
+                    **_provider_request_options(provider),
+                )
+            ) as client:
                 async with client.stream(
                     "POST",
-                    chat_completions_url(provider.base_url),
-                    headers={
-                        "accept": "application/json",
-                        "authorization": f"Bearer {api_key}",
-                        "content-type": "application/json",
-                    },
+                    request_url,
+                    headers=request_headers,
                     json=request_body,
                 ) as response:
                     http_status = response.status_code
                     request_id = _provider_request_id(response.headers)
                     async for chunk in response.aiter_text():
                         original_parts.append(chunk)
-                        safe_chunk = redact_sensitive_text(chunk, api_key)
+                        safe_chunk = redact_sensitive_text(
+                            chunk, api_key, provider.proxy_password
+                        )
                         safe_parts.append(safe_chunk)
                         response_body = "".join(safe_parts)
                         yield _sse_event("raw", {"chunk": safe_chunk})
@@ -893,7 +959,11 @@ async def stream_llm_node(
                         content=original_body.encode("utf-8"),
                     )
                     if not response.is_success:
-                        raise RuntimeError(_response_error_message(buffered_response, api_key))
+                        raise RuntimeError(
+                            _response_error_message(
+                                buffered_response, api_key, provider.proxy_password
+                            )
+                        )
             events.append(_event("INFO", "流式原始响应接收完成，未执行解析"))
             completed = running.model_copy(
                 update={
@@ -934,7 +1004,8 @@ async def stream_llm_node(
             )
         except Exception as exc:
             response_body = "".join(safe_parts) or response_body
-            message = redact_sensitive_text(str(exc), api_key)
+            proxy_password = provider.proxy_password if "provider" in locals() else None
+            message = redact_sensitive_text(str(exc), api_key, proxy_password)
             events.append(_event("ERROR", message))
             completed = running.model_copy(
                 update={
@@ -952,7 +1023,9 @@ async def stream_llm_node(
                     "error": {
                         "type": type(exc).__name__,
                         "message": message,
-                        "traceback": redact_sensitive_text(traceback.format_exc(), api_key),
+                        "traceback": redact_sensitive_text(
+                            traceback.format_exc(), api_key, proxy_password
+                        ),
                     },
                 }
             )

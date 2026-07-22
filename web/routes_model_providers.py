@@ -10,33 +10,50 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from execution import (
+    ANTHROPIC_VERSION,
     DEFAULT_DATABASE_PATH,
     ModelProviderConfiguration,
+    ModelProviderProtocol,
+    ModelProviderProxyMode,
     ModelProviderRecord,
     ModelProviderRepository,
     ModelProviderRepositoryError,
     ModelProviderSummary,
+    anthropic_headers,
+    build_anthropic_request,
+    build_chat_completion_request,
+    invoke_anthropic,
+    invoke_openai_compatible,
+    model_http_client_options,
+    parse_anthropic_response,
+    parse_openai_compatible_response,
+    redact_sensitive_text,
 )
 
 
 router = APIRouter(prefix="/api/model-providers", tags=["model-providers"])
 DATABASE_PATH = DEFAULT_DATABASE_PATH
 REQUEST_TIMEOUT_SECONDS = 12
-ANTHROPIC_VERSION = "2023-06-01"
 _repository_instance: ModelProviderRepository | None = None
 _repository_path: Path | None = None
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
 
 class ProviderConnectionRequest(_StrictModel):
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: str = Field(min_length=1, max_length=4096)
+    protocol: ModelProviderProtocol = ModelProviderProtocol.OPENAI_COMPATIBLE
+    proxy_mode: ModelProviderProxyMode = ModelProviderProxyMode.SYSTEM
+    proxy_url: str | None = Field(default=None, max_length=2048)
+    proxy_username: str | None = Field(default=None, max_length=512)
+    proxy_password: str | None = Field(default=None, max_length=4096)
+    skip_ssl_verify: bool = False
 
     @field_validator("base_url")
     @classmethod
@@ -61,6 +78,70 @@ class ProviderConnectionRequest(_StrictModel):
         if not value.strip():
             raise ValueError("API Key 不能为空")
         return value
+
+    @field_validator("protocol")
+    @classmethod
+    def validate_protocol(cls, value: ModelProviderProtocol) -> ModelProviderProtocol:
+        if value == ModelProviderProtocol.MANUAL:
+            raise ValueError("模型协议只支持 OPENAI_COMPATIBLE 或 ANTHROPIC")
+        return value
+
+    @field_validator("proxy_url", mode="before")
+    @classmethod
+    def validate_proxy_url(cls, value: object) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        normalized = str(value).strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+            raise ValueError("代理 URL 只支持 HTTP(S) 或 SOCKS5")
+        if (
+            not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("代理 URL 格式无效")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("代理 URL 端口无效") from exc
+        return normalized
+
+    @field_validator("proxy_username", "proxy_password", mode="before")
+    @classmethod
+    def normalize_proxy_credentials(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_proxy(self) -> "ProviderConnectionRequest":
+        if self.proxy_mode == ModelProviderProxyMode.CUSTOM and not self.proxy_url:
+            raise ValueError("自定义代理模式必须填写代理 URL")
+        if self.proxy_mode == ModelProviderProxyMode.CUSTOM:
+            if self.proxy_password and not self.proxy_username:
+                raise ValueError("填写代理密码时必须同时填写用户名")
+        else:
+            self.proxy_url = None
+            self.proxy_username = None
+            self.proxy_password = None
+        return self
+
+
+class ModelAvailabilityRequest(ProviderConnectionRequest):
+    model_name: str = Field(min_length=1, max_length=200)
+    default_body: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("模型名称不能为空")
+        return normalized
 
 
 class ProviderEnvelope(_StrictModel):
@@ -131,11 +212,7 @@ def extract_models(payload: Any) -> list[dict[str, str | None]]:
 
 def _protocol_headers(protocol: str, api_key: str) -> dict[str, str]:
     if protocol == "ANTHROPIC":
-        return {
-            "accept": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_VERSION,
-        }
+        return anthropic_headers(api_key)
     return {"accept": "application/json", "authorization": f"Bearer {api_key}"}
 
 
@@ -162,7 +239,15 @@ async def test_latency(body: ProviderConnectionRequest) -> dict[str, Any]:
     started_at = time.perf_counter()
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS
+            **model_http_client_options(
+                body.base_url,
+                timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+                proxy_mode=body.proxy_mode,
+                proxy_url=body.proxy_url,
+                proxy_username=body.proxy_username,
+                proxy_password=body.proxy_password,
+                skip_ssl_verify=body.skip_ssl_verify,
+            )
         ) as client:
             async with client.stream(
                 "GET", body.base_url,
@@ -181,37 +266,129 @@ async def test_latency(body: ProviderConnectionRequest) -> dict[str, Any]:
 async def fetch_models(body: ProviderConnectionRequest) -> dict[str, Any]:
     attempts: list[str] = []
     async with httpx.AsyncClient(
-        follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS
+        **model_http_client_options(
+            body.base_url,
+            timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            proxy_mode=body.proxy_mode,
+            proxy_url=body.proxy_url,
+            proxy_username=body.proxy_username,
+            proxy_password=body.proxy_password,
+            skip_ssl_verify=body.skip_ssl_verify,
+        )
     ) as client:
         for endpoint in build_model_candidates(body.base_url):
-            for protocol in ("OPENAI_COMPATIBLE", "ANTHROPIC"):
-                started_at = time.perf_counter()
-                try:
-                    response = await client.get(
-                        endpoint, headers=_protocol_headers(protocol, body.api_key)
-                    )
-                except httpx.HTTPError as exc:
-                    attempts.append(f"{protocol} {endpoint}: {type(exc).__name__}")
-                    continue
-                if not response.is_success:
-                    attempts.append(f"{protocol} {endpoint}: HTTP {response.status_code}")
-                    continue
-                try:
-                    models = extract_models(response.json())
-                except ValueError:
-                    attempts.append(f"{protocol} {endpoint}: 响应不是 JSON")
-                    continue
-                if not models:
-                    attempts.append(f"{protocol} {endpoint}: 未发现模型")
-                    continue
-                return {
-                    "protocol": protocol,
-                    "endpoint": endpoint,
-                    "latency_ms": round((time.perf_counter() - started_at) * 1000),
-                    "models": models,
-                }
+            protocol = (
+                body.protocol.value
+                if isinstance(body.protocol, ModelProviderProtocol)
+                else body.protocol
+            )
+            started_at = time.perf_counter()
+            try:
+                response = await client.get(
+                    endpoint, headers=_protocol_headers(protocol, body.api_key)
+                )
+            except httpx.HTTPError as exc:
+                attempts.append(f"{protocol} {endpoint}: {type(exc).__name__}")
+                continue
+            if not response.is_success:
+                attempts.append(f"{protocol} {endpoint}: HTTP {response.status_code}")
+                continue
+            try:
+                models = extract_models(response.json())
+            except ValueError:
+                attempts.append(f"{protocol} {endpoint}: 响应不是 JSON")
+                continue
+            if not models:
+                attempts.append(f"{protocol} {endpoint}: 未发现模型")
+                continue
+            return {
+                "protocol": protocol,
+                "endpoint": endpoint,
+                "latency_ms": round((time.perf_counter() - started_at) * 1000),
+                "models": models,
+            }
     summary = "；".join(attempts[-4:]) if attempts else "没有可用的模型端点"
     raise HTTPException(502, f"自动获取模型失败，可手工添加模型。{summary}")
+
+
+@router.post("/test-model")
+async def test_model_availability(body: ModelAvailabilityRequest) -> dict[str, Any]:
+    prompt = "请回复：模型连接正常。不要补充其他内容。"
+    messages = [{"role": "user", "content": prompt}]
+    forced_fields = {
+        "model": body.model_name,
+        "messages": messages,
+        "stream": False,
+    }
+    if body.protocol == "ANTHROPIC":
+        request_body = build_anthropic_request(
+            model_name=body.model_name,
+            messages=messages,
+            model_defaults=body.default_body,
+            model_parameters=forced_fields,
+        )
+        invoke = invoke_anthropic
+        parse = parse_anthropic_response
+    else:
+        request_body = build_chat_completion_request(
+            model_name=body.model_name,
+            messages=messages,
+            model_defaults=body.default_body,
+            model_parameters=forced_fields,
+        )
+        invoke = invoke_openai_compatible
+        parse = lambda response: parse_openai_compatible_response(
+            response, stream=False
+        )
+    started_at = time.perf_counter()
+    try:
+        response = await invoke(
+            base_url=body.base_url,
+            api_key=body.api_key,
+            request_body=request_body,
+            proxy_mode=body.proxy_mode,
+            proxy_url=body.proxy_url,
+            proxy_username=body.proxy_username,
+            proxy_password=body.proxy_password,
+            skip_ssl_verify=body.skip_ssl_verify,
+        )
+        latency_ms = round((time.perf_counter() - started_at) * 1000)
+        response_body = redact_sensitive_text(
+            response.text,
+            body.api_key,
+            body.proxy_password,
+        )
+        if not response.is_success:
+            return {
+                "available": False,
+                "latency_ms": latency_ms,
+                "status_code": response.status_code,
+                "output": None,
+                "response_body": response_body,
+                "error": f"HTTP {response.status_code}",
+            }
+        parsed = parse(response)
+        return {
+            "available": True,
+            "latency_ms": latency_ms,
+            "status_code": response.status_code,
+            "output": parsed["output"],
+            "response_body": response_body,
+            "error": None,
+        }
+    except (httpx.HTTPError, ValueError) as exc:
+        return {
+            "available": False,
+            "latency_ms": round((time.perf_counter() - started_at) * 1000),
+            "status_code": None,
+            "output": None,
+            "response_body": "",
+            "error": redact_sensitive_text(
+                f"{type(exc).__name__}: {exc}",
+                body.api_key,
+                body.proxy_password,
+            ),
+        }
 
 
 @router.get("/{provider_id}", response_model=ProviderEnvelope)

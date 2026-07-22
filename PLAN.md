@@ -1424,6 +1424,81 @@ T13.2.1-T13.2.6 已完成
 - 发布资源：Workflow JS/CSS 资源版本升级为 `v=31`；`AGENTS.md` 同步记录 START/END 可选、隐式起止、连线编辑、游离/循环校验和单节点运行边界。
 - 测试数据：浏览器 E2E 创建的无 START/END 临时 Workflow 已删除，API 仅保留用户原有 Workflow。
 
+### Step 17：Anthropic 原生协议与内网模型连接（in progress，2026-07-22）
+
+#### 业务背景与目标（Why）
+
+- 模型管理虽可识别 `ANTHROPIC`，但 Workflow LLM 节点只实现了 OpenAI-compatible 请求，导致已保存的 Anthropic 模型无法执行。
+- 企业内网模型网关常使用私有 IP、自签名证书，并且不应经过公司 VPN 注入的系统代理；目标是在不降低公网连接安全性的前提下打通这类本机调试场景。
+
+#### 用户与真实场景（Who / Where）
+
+- 企业测试工程师在本机模型管理中配置 OpenAI-compatible 或 Anthropic 供应商，再从 Workflow LLM 节点选择模型进行阻塞或流式验证。
+- 当 BASE_URL 主机是回环、私有或链路本地 IP 时，请求必须自动绕过系统代理；TLS 证书校验与代理模式独立，默认开启，仅在供应商详情显式勾选“跳过 SSL 证书验证”后关闭。
+
+#### 已确认范围与优先级（What / When）
+
+- P0：模型管理明确支持 `OPENAI_COMPATIBLE / ANTHROPIC` 两种可执行协议，手工添加模型不再等价于不可执行的 `MANUAL` 协议。
+- P0：实现 `build_anthropic_request / invoke_anthropic / parse_anthropic_response`，覆盖 Anthropic 原生阻塞与流式节点路径。
+- P0：共享内网 URL 判定与 httpx 客户端参数；只对明确的内网 IP 自动设置 `trust_env=False`，`verify=False` 仅由独立 SSL 开关控制。
+- 代理采用已确认的 `1A` 及后续细化：前端下拉、API、数据库与运行时统一使用 `SYSTEM / DIRECT / CUSTOM`。`SYSTEM` 默认继承环境变量；`DIRECT` 仅设置 `trust_env=False`；`CUSTOM` 保存 HTTP(S)/SOCKS URL及可选用户名/密码。`skip_ssl_verify` 是三种模式始终可见、默认关闭的独立设置，勾选后统一设置 `verify=False`。内网 IP 自动 `trust_env=False` 并忽略供应商代理，但不自动关闭证书校验。
+- 模型齿轮采用已确认的 `2A`：保存上下文窗口、最大输出 Token 能力和默认 Body JSON；前两项只作为模型元数据，不伪造跨厂商请求字段。
+- 参数采用已确认的 `3A`：平台基础请求 < 模型默认 Body < LLM 节点高级参数，后层递归覆盖前层；数组和标量整体替换。
+- 每个已添加模型在齿轮旁提供独立测试按钮；测试使用页面当前连接配置、代理和该模型默认 Body 发起真实阻塞推理，不打开弹窗，只在模型行标记可用/不可用并通过轻量提示反馈 HTTP 状态与延迟；不持久化为 Workflow 节点日志，也不隐式保存供应商。
+- Anthropic Messages API 强制要求 `max_tokens`；节点未显式设置时使用 `8192` 作为协议必需兼容值，用户 `modelParameters.max_tokens` 优先覆盖。OpenAI-compatible 仍不注入 token 上限。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 输入/输出 | 验证方法 | 依赖 |
+|---|---|---|---|---|
+| 17.1 | 协议与内网传输内核 | 两类请求/响应和 URL；httpx 参数 | MockTransport、URL/请求/响应、内外网参数单测 | 无 |
+| 17.2 | 模型管理接入 | 显式协议；测速和模型发现 | API、前端契约、本地 HTTP 服务 | 17.1 |
+| 17.3 | Workflow LLM 接入 | Anthropic 阻塞/流式原始日志 | 本地 Anthropic 网关节点 E2E、中断与变量提取 | 17.1-17.2 |
+| 17.4 | 集成回归与发布 | 完整业务流程和文档 | 专项/全量测试、构建、静态检查、浏览器 E2E、GitHub 推送 | 17.1-17.3 |
+
+##### 17.1 协议与内网传输内核（completed，2026-07-22）
+
+- 新增 Anthropic 原生请求构建、`/v1/messages` URL、`x-api-key / anthropic-version` Header、HTTP 调用和非流式响应解析；文本块按原顺序合并，usage 与 stop reason 保持原生语义。
+- Anthropic 基础请求仅因原生协议强制要求而默认加入 `max_tokens: 8192`，模型默认参数和节点高级参数仍可递归覆盖全部字段；OpenAI-compatible 的无默认 token 上限契约未改变。
+- 新增共享内网策略：只把 URL 中明确的回环、私有或链路本地 IP 识别为内网，并为其设置 `trust_env=False`；证书校验由独立 SSL 开关决定，公网域名继续使用 httpx 安全默认值。
+- 验证：`uv run pytest tests/test_model_gateway.py -q` 结果 `8 passed`；覆盖内外网判定、三类 Anthropic BASE_URL、Body 深度合并、专有 Header、原生响应文本/usage/stop reason 和既有 OpenAI 流式解析。
+- 依赖结论：共享协议内核可供模型管理和 Workflow 执行复用；模型级代理模式、默认 Body 和上下文元数据仍需按最新需求确认后进入 17.2。
+
+##### 17.2 模型管理接入（completed，2026-07-22）
+
+- 所有新增设置严格收口在“模型管理 → 供应商详情”：协议、代理模式、自定义代理认证、跳过 SSL 验证、模型默认 Body、上下文元数据、最大输出能力和单模型测试均不进入画布配置。
+- 协议在界面对用户统一显示为 `OpenAI / Anthropic`；持久化仍使用稳定的 `OPENAI_COMPATIBLE / ANTHROPIC` 标识。供应商列表、详情摘要和模型行均使用用户可见名称。
+- 每个模型的齿轮弹窗可保存 `context_window / max_output_tokens / default_body`；前两项仅是能力元数据，默认 Body 在执行时位于平台基础请求与节点高级参数之间。
+- 每个模型的测试按钮使用详情页当前连接、协议、代理和默认 Body 发起真实阻塞请求；测试不打开结果弹窗，模型行按钮直接标记可用/不可用，轻量提示反馈 HTTP 状态与延迟，且不隐式保存供应商。
+- 专项验证：`uv run pytest tests/test_model_gateway.py tests/test_model_providers.py tests/test_model_providers_frontend.py -q` 结果 `33 passed, 1 warning`；`node --check web/static/model-providers.js` 通过。
+- 浏览器 E2E：DeepSeek `deepseek-v4-pro` 真实单模型请求已验证返回 HTTP 200；详情页确认 `OpenAI / Anthropic`、三种代理模式、测试与齿轮按钮均在模型管理内，未点击保存且未修改用户数据。测试反馈已按最新要求改为无弹窗行内状态，待 17.4 最终浏览器回归复核。
+
+##### 17.3 Workflow LLM 接入（completed，2026-07-22）
+
+- Workflow 后端根据模型管理中已保存的协议选择 OpenAI-compatible 或 Anthropic 原生执行路径；画布和节点编辑 UI 未增加协议、代理、模型默认 Body、上下文或测试配置。
+- Anthropic 阻塞请求使用 `/v1/messages`、`x-api-key`、`anthropic-version`，系统提示词写入顶层 `system`；响应保留原始 Body，并解析文本、usage 和 stop reason 供日志与输出变量使用。
+- OpenAI 与 Anthropic 均按“平台基础请求 < 模型默认 Body < 节点高级参数”递归合并；模型能力元数据 `context_window / max_output_tokens` 不会被伪装成跨厂商请求字段。
+- 阻塞和流式请求统一消费供应商代理配置；私有 IP 自动直连策略仍优先于显式代理。代理密码与 API Key 不进入持久化日志或错误文本。
+- Anthropic 流式请求原样发送 SSE 到前端并持久化原始响应，不执行结构化解析、不提取输出变量；失败和中断继续保留已收到的真实原文与错误。
+- 专项验证：`uv run pytest tests/test_llm_node_runs.py tests/test_model_gateway.py tests/test_model_providers.py tests/test_model_providers_frontend.py -q` 结果 `41 passed, 1 warning`；新增本地 Anthropic 假网关覆盖路径、Header、系统提示词、默认 Body/节点覆盖、usage、变量提取和流式原文。`node --check` 与 Python `compileall` 均通过。
+
+##### 17.4 集成回归与发布（publishing，2026-07-22）
+
+- 构建：`npm run build` 通过，Workflow 构建产物无业务差异；模型管理使用独立静态 JS/CSS，无需修改画布资源版本。
+- 全量回归：`uv run pytest -q` 结果 `202 passed, 6 skipped, 1 warning`；6 项跳过仍是未向本轮进程注入真实供应商环境变量的 live 用例，warning 为既有 Starlette/httpx 弃用提示。
+- 静态检查：Python `compileall`、`node --check web/static/model-providers.js`、Workflow bundle 语法检查和 `git diff --check` 均通过。
+- 浏览器 E2E：模型管理详情显示 `OpenAI / Anthropic` 与统一代理枚举 `SYSTEM / DIRECT / CUSTOM`，DeepSeek `deepseek-v4-pro` 真实测试返回 HTTP 200；无结果弹窗，模型行测试按钮直接变为绿色勾选并显示可用、HTTP 状态和延迟提示。齿轮与测试按钮并列，页面无溢出；未点击保存且未修改用户供应商数据。
+- 详情页操作布局：删除右上角“未测试”徽标，保存按钮从底部操作栏移动到右上角且只保留一个入口；测速和模型获取状态继续在页面中部“连接状态”区域展示。专项 `25 passed, 1 warning`，浏览器确认标题栏、表单和操作栏布局正常。
+- SSL 解耦：三种代理模式始终显示“跳过 SSL 证书验证”开关且默认关闭；`DIRECT` 和内网 IP 只负责禁用系统代理，只有显式勾选才设置 `verify=False`。模型网关、供应商 API、持久化和前端专项结果 `44 passed, 1 warning`；浏览器矩阵确认 `SYSTEM / DIRECT / CUSTOM` 下开关均可见，CUSTOM 专属字段只在 CUSTOM 下展开，未保存用户数据。
+- 范围核对：协议、代理、模型默认配置与测试交互只改动模型管理详情；画布源码和构建产物均无 Git 差异。
+
+#### 验收标准与价值验证（How to Measure）
+
+- Anthropic 节点向 `/v1/messages` 发送 `x-api-key / anthropic-version`，阻塞响应可得到文本、usage、stop reason，原始 request/response 可供输出变量提取。
+- Anthropic 流式节点原样展示和持久化 SSE，不做结构化提取；失败和中断仍保存真实原始响应与错误。
+- 私有 IP 请求不读取系统代理；勾选独立 SSL 开关后可访问自签名 HTTPS。未勾选时，内外网请求均保持证书校验。
+- OpenAI-compatible 节点、模型管理 CRUD/发现、运行锁、中断、日志和最近 10 次记录无回归。
+
 ## 22. 待优化项目
 
 ### 22.1 独立凭据仓储与绑定
