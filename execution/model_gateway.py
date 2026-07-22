@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.parse import quote
@@ -112,19 +111,6 @@ def anthropic_messages_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
-def is_internal_ip_url(url: str) -> bool:
-    """Return true only when the URL host is an explicit non-public IP address."""
-
-    hostname = urlsplit(url.strip()).hostname
-    if not hostname:
-        return False
-    try:
-        address = ip_address(hostname)
-    except ValueError:
-        return False
-    return address.is_private or address.is_loopback or address.is_link_local
-
-
 def model_http_client_options(
     base_url: str,
     *,
@@ -133,15 +119,13 @@ def model_http_client_options(
     proxy_url: str | None = None,
     proxy_username: str | None = None,
     proxy_password: str | None = None,
-    skip_ssl_verify: bool = False,
+    verify_ssl: bool = True,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "follow_redirects": True,
         "timeout": timeout_seconds,
     }
-    if is_internal_ip_url(base_url):
-        options["trust_env"] = False
-    elif proxy_mode == "DIRECT":
+    if proxy_mode == "DIRECT":
         options["trust_env"] = False
     elif proxy_mode == "CUSTOM":
         if not proxy_url:
@@ -158,7 +142,7 @@ def model_http_client_options(
         )
     elif proxy_mode != "SYSTEM":
         raise ValueError(f"不支持的代理模式: {proxy_mode}")
-    if skip_ssl_verify:
+    if not verify_ssl:
         options["verify"] = False
     return options
 
@@ -202,7 +186,7 @@ async def invoke_openai_compatible(
     proxy_url: str | None = None,
     proxy_username: str | None = None,
     proxy_password: str | None = None,
-    skip_ssl_verify: bool = False,
+    verify_ssl: bool = True,
     client: httpx.AsyncClient | None = None,
 ) -> httpx.Response:
     """Send a prepared request without translating provider-specific parameters."""
@@ -216,7 +200,7 @@ async def invoke_openai_compatible(
             proxy_url=proxy_url,
             proxy_username=proxy_username,
             proxy_password=proxy_password,
-            skip_ssl_verify=skip_ssl_verify,
+            verify_ssl=verify_ssl,
         ),
     )
     try:
@@ -244,7 +228,7 @@ async def invoke_anthropic(
     proxy_url: str | None = None,
     proxy_username: str | None = None,
     proxy_password: str | None = None,
-    skip_ssl_verify: bool = False,
+    verify_ssl: bool = True,
     client: httpx.AsyncClient | None = None,
 ) -> httpx.Response:
     """Send a prepared native Anthropic Messages request."""
@@ -258,7 +242,7 @@ async def invoke_anthropic(
             proxy_url=proxy_url,
             proxy_username=proxy_username,
             proxy_password=proxy_password,
-            skip_ssl_verify=skip_ssl_verify,
+            verify_ssl=verify_ssl,
         ),
     )
     try:

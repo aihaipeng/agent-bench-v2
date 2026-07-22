@@ -124,9 +124,15 @@ function modelProviderEditorMarkup(provider) {
             '<label class="model-provider-field"><span>API Key <b>*</b></span><span class="model-provider-key-wrap"><input class="input" id="model-provider-api-key" type="password" maxlength="4096" autocomplete="off" required placeholder="输入 API Key" value="' + escAttr(provider && provider.api_key || '') + '" /><button id="model-provider-key-toggle" type="button" aria-label="显示 API Key" title="显示 API Key">显示</button></span></label>' +
             '<label class="model-provider-field"><span>BASE_URL <b>*</b></span><input class="input" id="model-provider-base-url" type="url" maxlength="2048" required placeholder="https://api.example.com" value="' + escAttr(provider && provider.base_url || '') + '" /></label>' +
             '<label class="model-provider-field"><span>协议 <b>*</b></span><select class="input" id="model-provider-protocol"><option value="OPENAI_COMPATIBLE"' + ((provider && provider.protocol) === 'ANTHROPIC' ? '' : ' selected') + '>OpenAI</option><option value="ANTHROPIC"' + ((provider && provider.protocol) === 'ANTHROPIC' ? ' selected' : '') + '>Anthropic</option></select></label>' +
-            '<div class="model-provider-field model-provider-proxy-setting"><span>代理模式 <b>*</b></span><div class="model-provider-proxy-control">' +
+            '<div class="model-provider-field model-provider-proxy-setting"><span>代理模式 <b>*</b><details class="model-provider-proxy-help"><summary aria-label="查看代理模式配置帮助" title="代理模式配置帮助">?</summary>' +
+                '<div class="model-provider-proxy-help-panel" role="tooltip"><strong>如何选择代理模式？</strong>' +
+                    '<section><b>SYSTEM</b><span>遵循系统的 HTTP_PROXY / HTTPS_PROXY / NO_PROXY，适合作为默认选择。</span></section>' +
+                    '<section><b>DIRECT</b><span>忽略系统代理和 VPN 注入的代理变量，直接连接目标服务。</span></section>' +
+                    '<section><b>CUSTOM</b><span>始终使用下方填写的 HTTP(S) 或 SOCKS5 代理。</span></section>' +
+                    '<p>SSL 证书验证独立于代理模式；仅在可信的自签名服务联调时关闭。</p>' +
+                '</div></details></span><div class="model-provider-proxy-control">' +
                 '<select class="input" id="model-provider-proxy-mode" aria-label="代理模式"><option value="SYSTEM"' + ((provider && provider.proxy_mode) === 'DIRECT' || (provider && provider.proxy_mode) === 'CUSTOM' ? '' : ' selected') + '>SYSTEM</option><option value="DIRECT"' + ((provider && provider.proxy_mode) === 'DIRECT' ? ' selected' : '') + '>DIRECT</option><option value="CUSTOM"' + ((provider && provider.proxy_mode) === 'CUSTOM' ? ' selected' : '') + '>CUSTOM</option></select>' +
-                '<label class="model-provider-checkbox model-provider-ssl-setting"><input id="model-provider-skip-ssl" type="checkbox"' + (provider && provider.skip_ssl_verify ? ' checked' : '') + ' /><span>跳过 SSL 证书验证</span></label>' +
+                '<label class="model-provider-switch model-provider-ssl-setting"><input id="model-provider-verify-ssl" type="checkbox" role="switch"' + (!provider || provider.verify_ssl !== false ? ' checked' : '') + ' /><span class="model-provider-switch-track" aria-hidden="true"></span><span>验证 SSL 证书</span><small class="model-provider-ssl-warning" id="model-provider-ssl-warning" hidden>不安全</small></label>' +
             '</div></div>' +
             '<section class="model-provider-proxy-fields' + ((provider && provider.proxy_mode) === 'CUSTOM' ? '' : ' is-hidden') + '" id="model-provider-proxy-fields">' +
                 '<label class="model-provider-field"><span>代理地址 <b>*</b></span><input class="input" id="model-provider-proxy-url" maxlength="2048" placeholder="http://proxy.corp.com:8080" value="' + escAttr(provider && provider.proxy_url || '') + '" /></label>' +
@@ -190,12 +196,14 @@ function bindModelProviderEditor() {
         renderSelectedProviderModels();
     });
     document.getElementById('model-provider-proxy-mode').addEventListener('change', syncModelProviderProxyFields);
+    document.getElementById('model-provider-verify-ssl').addEventListener('change', syncModelProviderSslWarning);
     document.getElementById('model-provider-latency').addEventListener('click', testModelProviderLatency);
     document.getElementById('model-provider-fetch').addEventListener('click', fetchProviderModels);
     document.getElementById('model-provider-add-model').addEventListener('click', toggleProviderModelChooser);
     document.getElementById('model-provider-confirm-model').addEventListener('click', addSelectedProviderModel);
     document.getElementById('model-provider-save').addEventListener('click', saveModelProvider);
     syncModelProviderProxyFields();
+    syncModelProviderSslWarning();
 }
 
 function syncModelProviderProxyFields() {
@@ -204,6 +212,11 @@ function syncModelProviderProxyFields() {
     var url = document.getElementById('model-provider-proxy-url');
     fields.classList.toggle('is-hidden', mode !== 'CUSTOM');
     url.required = mode === 'CUSTOM';
+}
+
+function syncModelProviderSslWarning() {
+    var verify = document.getElementById('model-provider-verify-ssl').checked;
+    document.getElementById('model-provider-ssl-warning').hidden = verify;
 }
 
 function toggleModelProviderKey() {
@@ -227,7 +240,7 @@ function readModelProviderConnection() {
         proxy_url: document.getElementById('model-provider-proxy-url').value.trim() || null,
         proxy_username: document.getElementById('model-provider-proxy-username').value.trim() || null,
         proxy_password: document.getElementById('model-provider-proxy-password').value || null,
-        skip_ssl_verify: document.getElementById('model-provider-skip-ssl').checked,
+        verify_ssl: document.getElementById('model-provider-verify-ssl').checked,
     };
 }
 
@@ -387,7 +400,7 @@ async function testProviderModel(model, button) {
             proxy_url: connection.proxy_mode === 'CUSTOM' ? connection.proxy_url : null,
             proxy_username: connection.proxy_mode === 'CUSTOM' ? connection.proxy_username : null,
             proxy_password: connection.proxy_mode === 'CUSTOM' ? connection.proxy_password : null,
-            skip_ssl_verify: connection.skip_ssl_verify,
+            verify_ssl: connection.verify_ssl,
             model_name: model,
             default_body: config.default_body || {},
         });
@@ -478,7 +491,7 @@ async function saveModelProvider() {
         proxy_url: connection.proxy_mode === 'CUSTOM' ? connection.proxy_url : null,
         proxy_username: connection.proxy_mode === 'CUSTOM' ? connection.proxy_username : null,
         proxy_password: connection.proxy_mode === 'CUSTOM' ? connection.proxy_password : null,
-        skip_ssl_verify: connection.skip_ssl_verify,
+        verify_ssl: connection.verify_ssl,
         model_endpoint: modelProviderState.endpoint,
         models: modelProviderState.selected.slice(),
         model_configs: JSON.parse(JSON.stringify(modelProviderState.modelConfigs)),

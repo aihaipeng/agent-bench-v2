@@ -1434,14 +1434,14 @@ T13.2.1-T13.2.6 已完成
 #### 用户与真实场景（Who / Where）
 
 - 企业测试工程师在本机模型管理中配置 OpenAI-compatible 或 Anthropic 供应商，再从 Workflow LLM 节点选择模型进行阻塞或流式验证。
-- 当 BASE_URL 主机是回环、私有或链路本地 IP 时，请求必须自动绕过系统代理；TLS 证书校验与代理模式独立，默认开启，仅在供应商详情显式勾选“跳过 SSL 证书验证”后关闭。
+- Step 18 已取代早期内网 IP 自动直连策略：BASE_URL 地址类型不再改变路由，用户必须显式选择 SYSTEM、DIRECT 或 CUSTOM；TLS 证书校验继续与代理模式独立。
 
 #### 已确认范围与优先级（What / When）
 
 - P0：模型管理明确支持 `OPENAI_COMPATIBLE / ANTHROPIC` 两种可执行协议，手工添加模型不再等价于不可执行的 `MANUAL` 协议。
 - P0：实现 `build_anthropic_request / invoke_anthropic / parse_anthropic_response`，覆盖 Anthropic 原生阻塞与流式节点路径。
-- P0：共享内网 URL 判定与 httpx 客户端参数；只对明确的内网 IP 自动设置 `trust_env=False`，`verify=False` 仅由独立 SSL 开关控制。
-- 代理采用已确认的 `1A` 及后续细化：前端下拉、API、数据库与运行时统一使用 `SYSTEM / DIRECT / CUSTOM`。`SYSTEM` 默认继承环境变量；`DIRECT` 仅设置 `trust_env=False`；`CUSTOM` 保存 HTTP(S)/SOCKS URL及可选用户名/密码。`skip_ssl_verify` 是三种模式始终可见、默认关闭的独立设置，勾选后统一设置 `verify=False`。内网 IP 自动 `trust_env=False` 并忽略供应商代理，但不自动关闭证书校验。
+- P0：HTTPX 客户端参数只由显式代理模式和 TLS 开关决定，不再包含地址类型启发式。
+- 代理采用已确认的 `1A` 及 Step 18 最终细化：前端下拉、API、数据库与运行时统一使用 `SYSTEM / DIRECT / CUSTOM`。SYSTEM 继承环境变量；DIRECT 设置 `trust_env=False`；CUSTOM 始终使用保存的 HTTP(S)/SOCKS URL及可选认证。正向 `verify_ssl` 默认 `true`，关闭后统一设置 `verify=False`。
 - 模型齿轮采用已确认的 `2A`：保存上下文窗口、最大输出 Token 能力和默认 Body JSON；前两项只作为模型元数据，不伪造跨厂商请求字段。
 - 参数采用已确认的 `3A`：平台基础请求 < 模型默认 Body < LLM 节点高级参数，后层递归覆盖前层；数组和标量整体替换。
 - 每个已添加模型在齿轮旁提供独立测试按钮；测试使用页面当前连接配置、代理和该模型默认 Body 发起真实阻塞推理，不打开弹窗，只在模型行标记可用/不可用并通过轻量提示反馈 HTTP 状态与延迟；不持久化为 Workflow 节点日志，也不隐式保存供应商。
@@ -1460,13 +1460,13 @@ T13.2.1-T13.2.6 已完成
 
 - 新增 Anthropic 原生请求构建、`/v1/messages` URL、`x-api-key / anthropic-version` Header、HTTP 调用和非流式响应解析；文本块按原顺序合并，usage 与 stop reason 保持原生语义。
 - Anthropic 基础请求仅因原生协议强制要求而默认加入 `max_tokens: 8192`，模型默认参数和节点高级参数仍可递归覆盖全部字段；OpenAI-compatible 的无默认 token 上限契约未改变。
-- 新增共享内网策略：只把 URL 中明确的回环、私有或链路本地 IP 识别为内网，并为其设置 `trust_env=False`；证书校验由独立 SSL 开关决定，公网域名继续使用 httpx 安全默认值。
+- Step 18 已删除共享内网 IP 判断；此阶段新增的 Anthropic 请求、代理参数构建和证书验证能力继续复用同一 HTTPX 传输内核。
 - 验证：`uv run pytest tests/test_model_gateway.py -q` 结果 `8 passed`；覆盖内外网判定、三类 Anthropic BASE_URL、Body 深度合并、专有 Header、原生响应文本/usage/stop reason 和既有 OpenAI 流式解析。
 - 依赖结论：共享协议内核可供模型管理和 Workflow 执行复用；模型级代理模式、默认 Body 和上下文元数据仍需按最新需求确认后进入 17.2。
 
 ##### 17.2 模型管理接入（completed，2026-07-22）
 
-- 所有新增设置严格收口在“模型管理 → 供应商详情”：协议、代理模式、自定义代理认证、跳过 SSL 验证、模型默认 Body、上下文元数据、最大输出能力和单模型测试均不进入画布配置。
+- 所有新增设置严格收口在“模型管理 → 供应商详情”：协议、代理模式、自定义代理认证、SSL 证书验证、模型默认 Body、上下文元数据、最大输出能力和单模型测试均不进入画布配置。
 - 协议在界面对用户统一显示为 `OpenAI / Anthropic`；持久化仍使用稳定的 `OPENAI_COMPATIBLE / ANTHROPIC` 标识。供应商列表、详情摘要和模型行均使用用户可见名称。
 - 每个模型的齿轮弹窗可保存 `context_window / max_output_tokens / default_body`；前两项仅是能力元数据，默认 Body 在执行时位于平台基础请求与节点高级参数之间。
 - 每个模型的测试按钮使用详情页当前连接、协议、代理和默认 Body 发起真实阻塞请求；测试不打开结果弹窗，模型行按钮直接标记可用/不可用，轻量提示反馈 HTTP 状态与延迟，且不隐式保存供应商。
@@ -1478,7 +1478,7 @@ T13.2.1-T13.2.6 已完成
 - Workflow 后端根据模型管理中已保存的协议选择 OpenAI-compatible 或 Anthropic 原生执行路径；画布和节点编辑 UI 未增加协议、代理、模型默认 Body、上下文或测试配置。
 - Anthropic 阻塞请求使用 `/v1/messages`、`x-api-key`、`anthropic-version`，系统提示词写入顶层 `system`；响应保留原始 Body，并解析文本、usage 和 stop reason 供日志与输出变量使用。
 - OpenAI 与 Anthropic 均按“平台基础请求 < 模型默认 Body < 节点高级参数”递归合并；模型能力元数据 `context_window / max_output_tokens` 不会被伪装成跨厂商请求字段。
-- 阻塞和流式请求统一消费供应商代理配置；私有 IP 自动直连策略仍优先于显式代理。代理密码与 API Key 不进入持久化日志或错误文本。
+- 阻塞和流式请求统一消费供应商显式代理配置；目标 IP 类型不会覆盖用户选择。代理密码与 API Key 不进入持久化日志或错误文本。
 - Anthropic 流式请求原样发送 SSE 到前端并持久化原始响应，不执行结构化解析、不提取输出变量；失败和中断继续保留已收到的真实原文与错误。
 - 专项验证：`uv run pytest tests/test_llm_node_runs.py tests/test_model_gateway.py tests/test_model_providers.py tests/test_model_providers_frontend.py -q` 结果 `41 passed, 1 warning`；新增本地 Anthropic 假网关覆盖路径、Header、系统提示词、默认 Body/节点覆盖、usage、变量提取和流式原文。`node --check` 与 Python `compileall` 均通过。
 
@@ -1489,7 +1489,7 @@ T13.2.1-T13.2.6 已完成
 - 静态检查：Python `compileall`、`node --check web/static/model-providers.js`、Workflow bundle 语法检查和 `git diff --check` 均通过。
 - 浏览器 E2E：模型管理详情显示 `OpenAI / Anthropic` 与统一代理枚举 `SYSTEM / DIRECT / CUSTOM`，DeepSeek `deepseek-v4-pro` 真实测试返回 HTTP 200；无结果弹窗，模型行测试按钮直接变为绿色勾选并显示可用、HTTP 状态和延迟提示。齿轮与测试按钮并列，页面无溢出；未点击保存且未修改用户供应商数据。
 - 详情页操作布局：删除右上角“未测试”徽标，保存按钮从底部操作栏移动到右上角且只保留一个入口；测速和模型获取状态继续在页面中部“连接状态”区域展示。专项 `25 passed, 1 warning`，浏览器确认标题栏、表单和操作栏布局正常。
-- SSL 解耦：三种代理模式始终显示“跳过 SSL 证书验证”开关且默认关闭；`DIRECT` 和内网 IP 只负责禁用系统代理，只有显式勾选才设置 `verify=False`。模型网关、供应商 API、持久化和前端专项结果 `44 passed, 1 warning`；浏览器矩阵确认 `SYSTEM / DIRECT / CUSTOM` 下开关均可见，CUSTOM 专属字段只在 CUSTOM 下展开，未保存用户数据。
+- SSL 解耦的早期负向开关已由 Step 18 迁移为正向 `verify_ssl`：默认验证证书，用户关闭后才设置 `verify=False`；三种代理模式与 TLS 继续相互独立。
 - 代理布局优化：代理模式下拉缩短，独立 SSL 开关移动到其右侧同一行并保持垂直对齐；CUSTOM 展开区和连接行为不变。前端专项 `3 passed, 1 warning`、全量 `202 passed, 6 skipped, 1 warning`、JS/Python 静态检查和真实浏览器视觉验收均通过，未保存用户数据。
 - 范围核对：协议、代理、模型默认配置与测试交互只改动模型管理详情；画布源码和构建产物均无 Git 差异。
 - GitHub 发布：实现提交 `2be91ef` 已推送到 `origin/codex/tool-template-refactor`；提交前扫描确认没有 API Key 形式的秘密进入 Git 差异。
@@ -1498,8 +1498,67 @@ T13.2.1-T13.2.6 已完成
 
 - Anthropic 节点向 `/v1/messages` 发送 `x-api-key / anthropic-version`，阻塞响应可得到文本、usage、stop reason，原始 request/response 可供输出变量提取。
 - Anthropic 流式节点原样展示和持久化 SSE，不做结构化提取；失败和中断仍保存真实原始响应与错误。
-- 私有 IP 请求不读取系统代理；勾选独立 SSL 开关后可访问自签名 HTTPS。未勾选时，内外网请求均保持证书校验。
+- 私有 IP 与域名遵循相同的显式代理模式；关闭“验证 SSL 证书”后可访问自签名 HTTPS，开关开启时保持证书校验。
 - OpenAI-compatible 节点、模型管理 CRUD/发现、运行锁、中断、日志和最近 10 次记录无回归。
+
+### Step 18：Provider 显式路由与 TLS 信任（completed，2026-07-22）
+
+#### 业务背景与目标（Why）
+
+- 通过内网 IP 猜测并覆盖用户代理选择会让 `CUSTOM` 被静默忽略，也无法覆盖内部域名、内网代理和跨网段代理；目标是让 Provider 在不同网络环境下具有稳定、可解释的连接行为。
+- 代理路由与 TLS 证书信任是两项独立决策。TLS 使用正向、默认安全的语义，避免负向开关造成误解。
+
+#### 用户与真实场景（Who / Where）
+
+- 本机企业测试工程师可能处于公司 VPN、全局代理、显式 HTTP/SOCKS 代理或直连网络中，需要准确选择请求路径。
+- 内部模型服务可能使用受信 CA、自签名证书或企业内部 CA；关闭证书验证只能作为当前快速联调手段，不能与内网地址自动绑定。
+
+#### 已确认范围与优先级（What / When）
+
+- P0：严格执行 `SYSTEM / DIRECT / CUSTOM`。`SYSTEM` 使用 HTTPX 环境变量及 `NO_PROXY`；`DIRECT` 设置 `trust_env=False`；`CUSTOM` 设置显式代理并且不再被目标 IP 类型覆盖。
+- P0：前端、API、持久化和运行时统一使用正向 `verify_ssl`，默认 `true`；仅在用户关闭“验证 SSL 证书”开关时传递 `verify=False`。
+- P0：代理帮助只解释三种路由模式，公网/内网作为辅助示例，不参与运行时自动判断。
+- P1 deferred：支持自定义 CA Bundle，使企业内部 CA 场景无需关闭证书验证。
+
+#### 可独立验证子任务
+
+| 子任务 | 目标 | 验证方法 | 依赖 |
+|---|---|---|---|
+| 18.1 | 删除 IP 启发式，严格执行三种代理模式 | HTTPX 客户端参数矩阵单测 | 无 |
+| 18.2 | `verify_ssl` 正向契约与旧本机数据迁移 | Repository/API/Workflow 专项测试 | 18.1 |
+| 18.3 | 正向开关和模式帮助 | 前端契约、JS 语法、桌面浏览器 E2E | 18.2 |
+| 18.4 | 集成回归与发布 | 全量 pytest、静态检查、密钥扫描、GitHub 推送 | 18.1-18.3 |
+
+##### 18.1 显式代理路由（completed，2026-07-22）
+
+- 删除内网 IP/回环 IP/链路本地 IP 的自动路由判断，HTTPX 参数只由 `SYSTEM / DIRECT / CUSTOM` 决定；CUSTOM 对内网 IP 仍传递显式代理。
+- 验证：`uv run pytest tests/test_model_gateway.py -q` 结果 `8 passed`，覆盖公网域名与内网 IP 在三种代理模式下使用完全一致的路由规则。
+
+##### 18.2 正向 TLS 契约（completed，2026-07-22）
+
+- 前端、模型管理 API、Pydantic 模型、SQLite Repository、模型测试和 Workflow 阻塞/流式请求统一使用 `verify_ssl`，默认 `true`；`false` 时 HTTPX 才收到 `verify=False`。
+- SQLite 初始化新增 `verify_ssl` 列；检测到旧 `skip_ssl_verify` 列时按反向语义迁移，保留已有 Provider 的连接行为。列表 API 继续隐藏 TLS/代理细节，详情 API 返回正向值。
+- 验证：模型网关、Provider Repository/API、Workflow LLM 与前端契约合计 `45 passed, 1 warning`；覆盖旧表迁移、三种代理模式独立 TLS 值和 CUSTOM 对内网地址不再旁路。
+
+##### 18.3 模式帮助与安全开关（completed，2026-07-22）
+
+- 代理模式下拉保持紧凑，右侧使用正向“验证 SSL 证书”滑动开关，默认开启；关闭后同一行显示红色“不安全”提示。
+- `?` 支持悬停 CSS 与原生点击展开，内容直接解释 SYSTEM（环境变量及 NO_PROXY）、DIRECT（忽略环境代理）和 CUSTOM（始终使用显式 HTTP(S)/SOCKS5 代理），并明确 TLS 与代理模式独立。
+- 前端契约和 JS 语法已纳入 18.2 的 `45 passed` 专项；桌面浏览器验证帮助点击、开关启停/恢复和无溢出布局。迁移后的 DeepSeek Provider 使用 SYSTEM + `verify_ssl=true` 真实测试返回 HTTP 200，页面行内显示可用；未点击保存。
+
+##### 18.4 集成回归与本地提交（completed，2026-07-22）
+
+- `npm run build` 通过且 Workflow 构建产物无 Git 差异；Python `compileall`、模型管理 JS 与 Workflow bundle 语法检查、`git diff --check` 全部通过。
+- 全量 `uv run pytest -q` 结果 `203 passed, 6 skipped, 1 warning`；6 项跳过仍是未向本轮进程注入真实供应商环境变量的 live 用例，warning 为既有 Starlette/httpx 弃用提示。
+- 浏览器完整流程确认正向 TLS 默认值、模式帮助、关闭验证的不安全提示、SYSTEM 状态恢复和 DeepSeek 真实 HTTP 200；未保存或修改用户 Provider。
+- Git 差异未包含画布文件，API Key 形式秘密扫描结果为 0。按用户最新要求只创建本地提交，由用户自行推送当前分支。
+
+#### 验收标准与价值验证（How to Measure）
+
+- 相同代理模式不因 BASE_URL 是公网 IP、内网 IP 或域名而改变；CUSTOM 始终使用用户填写的代理。
+- `verify_ssl=true` 时不向 HTTPX 注入 `verify=False`；关闭开关后所有代理模式统一使用 `verify=False`。
+- 帮助提示明确说明三种模式与 TLS 独立关系；默认页面显示证书验证开启。
+- 现有 Provider 的旧 `skip_ssl_verify` 值迁移后语义保持一致，API Key 和代理密码不进入列表或日志。
 
 ## 22. 待优化项目
 
@@ -1512,3 +1571,10 @@ T13.2.1-T13.2.6 已完成
 - 画布内复制节点可保留同机绑定；发布模板和导出 Workflow 必须剥离本机凭据 ID；导入后显示未绑定并要求接收者重新选择。
 - 删除或失效凭据后，引用节点必须进入明确的“凭据失效”状态并禁止运行。
 - 对日志、错误、Artifact 和用户主动打印内容增加已知秘密值脱敏；明确无法可靠识别任意 Python 硬编码秘密的残余风险。
+
+### 22.2 Provider 自定义 CA Bundle
+
+- 在模型管理供应商详情增加可选的本机 CA Bundle 配置，支持企业内部 CA 和自签名根证书；文件路径和证书内容不得进入 Workflow 或导出数据。
+- 运行时使用 `ssl.create_default_context(cafile=...)` 构建 HTTPX SSLContext，并保持 `verify_ssl=true`；模型发现、测速、单模型测试、Workflow 阻塞和流式请求必须复用同一证书上下文。
+- CA 文件缺失、格式错误或不可读取时在发起网络请求前给出明确错误；不得静默降级为 `verify=False`。
+- UI 优先引导用户配置内部 CA，关闭“验证 SSL 证书”仅保留为可信内网临时联调手段，并持续显示“不安全”状态。
