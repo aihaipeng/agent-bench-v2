@@ -26,6 +26,8 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             {
                 "path": self.path,
                 "authorization": self.headers.get("authorization"),
+                "x_api_key": self.headers.get("x-api-key"),
+                "anthropic_version": self.headers.get("anthropic-version"),
                 "body": body,
             }
         )
@@ -107,16 +109,23 @@ def _workflow_body(base_url: str, *, user_prompt="请评估：${question}", para
     }
 
 
-def _create_provider(database_path, base_url: str):
+def _create_provider(
+    database_path,
+    base_url: str,
+    *,
+    protocol: str = "OPENAI_COMPATIBLE",
+    model_configs: dict | None = None,
+):
     ModelProviderRepository(database_path).create(
         ModelProviderRecord(
             id="provider-1",
             name="Local Gateway",
             api_key="secret-never-return",
             base_url=base_url,
-            protocol="OPENAI_COMPATIBLE",
+            protocol=protocol,
             model_endpoint=f"{base_url}/models",
             models=["model-1"],
+            model_configs=model_configs or {},
         )
     )
 
@@ -193,6 +202,8 @@ def test_llm_node_real_http_run_persists_output_usage_and_safe_request(
         {
             "path": "/v1/chat/completions",
             "authorization": "Bearer secret-never-return",
+            "x_api_key": None,
+            "anthropic_version": None,
             "body": run["request_body"],
         }
     ]
@@ -248,6 +259,99 @@ def test_llm_node_missing_variable_fails_before_provider_request(tmp_path, monke
     assert run["request_body"] == {}
     assert run["response_body"] == ""
     assert _GatewayHandler.requests == []
+
+
+def test_anthropic_node_uses_native_protocol_model_defaults_and_node_overrides(
+    tmp_path, monkeypatch
+):
+    _GatewayHandler.requests = []
+    _GatewayHandler.response_status = 200
+    _GatewayHandler.response_body = {
+        "id": "message-1",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Anthropic 原生响应"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 13, "output_tokens": 8},
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GatewayHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        database_path = _patch_database(tmp_path, monkeypatch)
+        _create_provider(
+            database_path,
+            base_url,
+            protocol="ANTHROPIC",
+            model_configs={
+                "model-1": {
+                    "context_window": 200000,
+                    "max_output_tokens": 8192,
+                    "default_body": {
+                        "max_tokens": 4096,
+                        "temperature": 0.2,
+                        "metadata": {"source": "model", "priority": "default"},
+                    },
+                }
+            },
+        )
+        body = _workflow_body(
+            base_url,
+            parameters={
+                "temperature": 0.7,
+                "metadata": {"priority": "node"},
+            },
+        )
+        body["nodes"][1]["data"]["systemPrompt"] = "你是企业评测助手"
+        body["nodes"][1]["data"]["outputVariables"] = [
+            {
+                "id": "output-1",
+                "name": "llm_output",
+                "value": "response.content[0].text",
+            },
+            {
+                "id": "output-2",
+                "name": "token_count",
+                "type": "INTEGER",
+                "value": "response.usage.output_tokens",
+            },
+        ]
+        client = TestClient(app)
+        workflow = client.post("/api/workflow-drafts", json=body).json()["workflow"]
+        run = client.post(
+            f"/api/workflow-drafts/{workflow['id']}/nodes/llm-1/runs"
+        ).json()["run"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert run["status"] == "SUCCESS"
+    assert run["output"] == "Anthropic 原生响应"
+    assert run["usage"] == {"input_tokens": 13, "output_tokens": 8}
+    assert run["output_variables"] == {
+        "llm_output": "Anthropic 原生响应",
+        "token_count": 8,
+    }
+    assert run["request_body"]["system"] == "你是企业评测助手"
+    assert run["request_body"]["messages"] == [
+        {"role": "user", "content": "请评估：退款流程"}
+    ]
+    assert run["request_body"]["max_tokens"] == 4096
+    assert run["request_body"]["temperature"] == 0.7
+    assert run["request_body"]["metadata"] == {
+        "source": "model",
+        "priority": "node",
+    }
+    assert _GatewayHandler.requests == [
+        {
+            "path": "/v1/messages",
+            "authorization": None,
+            "x_api_key": "secret-never-return",
+            "anthropic_version": "2023-06-01",
+            "body": run["request_body"],
+        }
+    ]
 
 
 def test_llm_node_http_error_is_persisted_without_api_key(tmp_path, monkeypatch):
@@ -399,6 +503,49 @@ def test_llm_node_stream_endpoint_emits_raw_chunks_and_persists_final_run(
     assert final["request_body"]["stream"] is True
     assert final["output_variables"] == {}
     assert any("未执行解析" in event["message"] for event in final["events"])
+
+
+def test_anthropic_stream_uses_native_endpoint_and_keeps_raw_sse(tmp_path, monkeypatch):
+    _GatewayHandler.requests = []
+    _GatewayHandler.response_status = 200
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GatewayHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        database_path = _patch_database(tmp_path, monkeypatch)
+        _create_provider(database_path, base_url, protocol="ANTHROPIC")
+        client = TestClient(app)
+        workflow = client.post(
+            "/api/workflow-drafts",
+            json=_workflow_body(base_url, parameters={"stream": True}),
+        ).json()["workflow"]
+        response = client.post(
+            f"/api/workflow-drafts/{workflow['id']}/nodes/llm-1/runs/stream"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    events = []
+    current_event = None
+    for line in response.text.splitlines():
+        if line.startswith("event: "):
+            current_event = line[7:]
+        elif line.startswith("data: "):
+            events.append((current_event, json.loads(line[6:])))
+    raw = "".join(payload["chunk"] for event, payload in events if event == "raw")
+    final = [payload for event, payload in events if event == "run"][0]
+    assert final["status"] == "SUCCESS"
+    assert final["response_body"] == raw
+    assert final["output_variables"] == {}
+    assert final["usage"] is None
+    assert _GatewayHandler.requests[0]["path"] == "/v1/messages"
+    assert _GatewayHandler.requests[0]["authorization"] is None
+    assert _GatewayHandler.requests[0]["x_api_key"] == "secret-never-return"
+    assert _GatewayHandler.requests[0]["anthropic_version"] == "2023-06-01"
+    assert _GatewayHandler.requests[0]["body"]["stream"] is True
+    assert _GatewayHandler.requests[0]["body"]["max_tokens"] == 8192
 
 
 def test_llm_stream_can_be_interrupted_and_persists_partial_raw_response(

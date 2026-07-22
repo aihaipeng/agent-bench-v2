@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote
 
 import httpx
+
+
+ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 
 
 def deep_merge_model_request(
@@ -59,6 +65,31 @@ def build_chat_completion_request(
     )
 
 
+def build_anthropic_request(
+    *,
+    model_name: str,
+    messages: Sequence[Mapping[str, Any]],
+    system_prompt: str = "",
+    model_defaults: Mapping[str, Any] | None = None,
+    model_parameters: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an Anthropic Messages request with fully overridable body fields."""
+
+    base_request: dict[str, Any] = {
+        "model": model_name,
+        "messages": [deepcopy(dict(message)) for message in messages],
+        "max_tokens": DEFAULT_ANTHROPIC_MAX_TOKENS,
+        "stream": False,
+    }
+    if system_prompt.strip():
+        base_request["system"] = system_prompt
+    return deep_merge_model_request(
+        base_request,
+        model_defaults,
+        model_parameters,
+    )
+
+
 def chat_completions_url(base_url: str) -> str:
     parsed = urlsplit(base_url.strip().rstrip("/"))
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -69,20 +100,124 @@ def chat_completions_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
+def anthropic_messages_url(base_url: str) -> str:
+    parsed = urlsplit(base_url.strip().rstrip("/"))
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("BASE_URL 必须是有效的 HTTP 或 HTTPS 地址")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/messages"):
+        if not path.rsplit("/", 1)[-1].lower() in {"v1", "v2"}:
+            path = f"{path}/v1"
+        path = f"{path}/messages"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def is_internal_ip_url(url: str) -> bool:
+    """Return true only when the URL host is an explicit non-public IP address."""
+
+    hostname = urlsplit(url.strip()).hostname
+    if not hostname:
+        return False
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def model_http_client_options(
+    base_url: str,
+    *,
+    timeout_seconds: float,
+    proxy_mode: str = "SYSTEM",
+    proxy_url: str | None = None,
+    proxy_username: str | None = None,
+    proxy_password: str | None = None,
+    skip_ssl_verify: bool = False,
+) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "follow_redirects": True,
+        "timeout": timeout_seconds,
+    }
+    if is_internal_ip_url(base_url):
+        options["trust_env"] = False
+    elif proxy_mode == "DIRECT":
+        options["trust_env"] = False
+    elif proxy_mode == "CUSTOM":
+        if not proxy_url:
+            raise ValueError("自定义代理模式缺少代理 URL")
+        options.update(
+            {
+                "trust_env": False,
+                "proxy": _proxy_url_with_auth(
+                    proxy_url,
+                    username=proxy_username,
+                    password=proxy_password,
+                ),
+            }
+        )
+    elif proxy_mode != "SYSTEM":
+        raise ValueError(f"不支持的代理模式: {proxy_mode}")
+    if skip_ssl_verify:
+        options["verify"] = False
+    return options
+
+
+def _proxy_url_with_auth(
+    proxy_url: str,
+    *,
+    username: str | None,
+    password: str | None,
+) -> str:
+    if not username:
+        return proxy_url
+    parsed = urlsplit(proxy_url)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    credentials = quote(username, safe="")
+    if password is not None:
+        credentials += ":" + quote(password, safe="")
+    netloc = f"{credentials}@{hostname}{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def anthropic_headers(api_key: str) -> dict[str, str]:
+    return {
+        "accept": "application/json",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+        "x-api-key": api_key,
+    }
+
+
 async def invoke_openai_compatible(
     *,
     base_url: str,
     api_key: str,
     request_body: Mapping[str, Any],
     timeout_seconds: float = 120,
+    proxy_mode: str = "SYSTEM",
+    proxy_url: str | None = None,
+    proxy_username: str | None = None,
+    proxy_password: str | None = None,
+    skip_ssl_verify: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> httpx.Response:
     """Send a prepared request without translating provider-specific parameters."""
 
     owns_client = client is None
     active_client = client or httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=timeout_seconds,
+        **model_http_client_options(
+            base_url,
+            timeout_seconds=timeout_seconds,
+            proxy_mode=proxy_mode,
+            proxy_url=proxy_url,
+            proxy_username=proxy_username,
+            proxy_password=proxy_password,
+            skip_ssl_verify=skip_ssl_verify,
+        ),
     )
     try:
         return await active_client.post(
@@ -92,6 +227,44 @@ async def invoke_openai_compatible(
                 "authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
             },
+            json=deepcopy(dict(request_body)),
+        )
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+async def invoke_anthropic(
+    *,
+    base_url: str,
+    api_key: str,
+    request_body: Mapping[str, Any],
+    timeout_seconds: float = 120,
+    proxy_mode: str = "SYSTEM",
+    proxy_url: str | None = None,
+    proxy_username: str | None = None,
+    proxy_password: str | None = None,
+    skip_ssl_verify: bool = False,
+    client: httpx.AsyncClient | None = None,
+) -> httpx.Response:
+    """Send a prepared native Anthropic Messages request."""
+
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(
+        **model_http_client_options(
+            base_url,
+            timeout_seconds=timeout_seconds,
+            proxy_mode=proxy_mode,
+            proxy_url=proxy_url,
+            proxy_username=proxy_username,
+            proxy_password=proxy_password,
+            skip_ssl_verify=skip_ssl_verify,
+        ),
+    )
+    try:
+        return await active_client.post(
+            anthropic_messages_url(base_url),
+            headers=anthropic_headers(api_key),
             json=deepcopy(dict(request_body)),
         )
     finally:
@@ -131,6 +304,34 @@ def parse_openai_compatible_response(
         "output": deepcopy(output),
         "usage": deepcopy(usage) if isinstance(usage, dict) else None,
         "finish_reason": choice.get("finish_reason"),
+    }
+
+
+def parse_anthropic_response(response: httpx.Response) -> dict[str, Any]:
+    """Extract final output and usage from a native Anthropic message response."""
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError("模型响应不是合法 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("模型响应必须是 JSON 对象")
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise ValueError("Anthropic 模型响应缺少 content")
+    text_parts = [
+        block["text"]
+        for block in content
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
+    output: Any = "".join(text_parts)
+    if not output:
+        output = deepcopy(content)
+    usage = payload.get("usage")
+    return {
+        "output": output,
+        "usage": deepcopy(usage) if isinstance(usage, dict) else None,
+        "finish_reason": payload.get("stop_reason"),
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -37,12 +38,33 @@ def _patch_database(tmp_path, monkeypatch):
 def test_model_provider_repository_restart_round_trip(tmp_path):
     database_path = tmp_path / "agent_bench.sqlite3"
     repository = ModelProviderRepository(database_path)
-    created = repository.create(ModelProviderRecord(id="provider-1", **_body()))
+    created = repository.create(
+        ModelProviderRecord(
+            id="provider-1",
+            **_body(
+                proxy_mode="CUSTOM",
+                proxy_url="http://proxy.local:8080",
+                model_configs={
+                    "deepseek-chat": {
+                        "context_window": 128000,
+                        "max_output_tokens": 8192,
+                        "default_body": {"temperature": 0.2},
+                    }
+                },
+            ),
+        )
+    )
 
     restored = ModelProviderRepository(database_path).get(created.id)
     assert restored is not None
     assert restored.api_key == "local-secret"
     assert restored.models == ["deepseek-chat", "deepseek-reasoner"]
+    assert restored.proxy_mode == "CUSTOM"
+    assert restored.proxy_url == "http://proxy.local:8080"
+    assert restored.model_configs["deepseek-chat"].context_window == 128000
+    assert restored.model_configs["deepseek-chat"].default_body == {
+        "temperature": 0.2
+    }
 
     updated = ModelProviderRecord(
         id=created.id,
@@ -52,6 +74,58 @@ def test_model_provider_repository_restart_round_trip(tmp_path):
     assert repository.update(updated).name == "更新供应商"
     assert repository.delete(created.id) is True
     assert repository.delete(created.id) is False
+
+
+@pytest.mark.parametrize("proxy_mode", ["SYSTEM", "DIRECT", "CUSTOM"])
+def test_skip_ssl_verify_is_independent_from_proxy_mode(tmp_path, proxy_mode):
+    overrides = {"proxy_mode": proxy_mode, "skip_ssl_verify": True}
+    if proxy_mode == "CUSTOM":
+        overrides["proxy_url"] = "http://proxy.local:8080"
+    record = ModelProviderRepository(tmp_path / "models.sqlite3").create(
+        ModelProviderRecord(**_body(**overrides))
+    )
+
+    assert record.proxy_mode == proxy_mode
+    assert record.skip_ssl_verify is True
+
+    connection_values = {
+        "base_url": "https://api.example.com",
+        "api_key": "secret",
+        "proxy_mode": proxy_mode,
+        "skip_ssl_verify": True,
+    }
+    if proxy_mode == "CUSTOM":
+        connection_values["proxy_url"] = "http://proxy.local:8080"
+    connection = routes_model_providers.ProviderConnectionRequest(
+        **connection_values
+    )
+    assert connection.skip_ssl_verify is True
+
+
+def test_model_provider_repository_migrates_existing_table(tmp_path):
+    database_path = tmp_path / "agent_bench.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE model_providers (
+                id TEXT PRIMARY KEY, name TEXT, website_url TEXT, api_key TEXT NOT NULL,
+                base_url TEXT NOT NULL, protocol TEXT NOT NULL, model_endpoint TEXT,
+                models_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO model_providers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy", "Legacy", None, "secret", "https://api.example.com",
+                "OPENAI_COMPATIBLE", None, '["model-1"]', "now", "now",
+            ),
+        )
+    restored = ModelProviderRepository(database_path).get("legacy")
+    assert restored is not None
+    assert restored.proxy_mode == "SYSTEM"
+    assert restored.proxy_url is None
+    assert restored.model_configs == {}
 
 
 def test_model_provider_api_crud_and_list_hides_api_key(tmp_path, monkeypatch):
@@ -66,6 +140,9 @@ def test_model_provider_api_crud_and_list_hides_api_key(tmp_path, monkeypatch):
     listed = client.get("/api/model-providers").json()["providers"]
     assert len(listed) == 1
     assert "api_key" not in listed[0]
+    assert "proxy_url" not in listed[0]
+    assert "model_configs" not in listed[0]
+    assert listed[0]["proxy_mode"] == "SYSTEM"
     assert client.get(f"/api/model-providers/{created['id']}").json()["provider"] == created
 
     updated_response = client.put(
@@ -95,6 +172,11 @@ def test_model_provider_api_crud_and_list_hides_api_key(tmp_path, monkeypatch):
         {"models": ["ok", "  "]},
         {"models": [123]},
         {"protocol": "UNKNOWN"},
+        {"protocol": "MANUAL"},
+        {"proxy_mode": "CUSTOM", "proxy_url": None},
+        {"proxy_mode": "CUSTOM", "proxy_url": "ftp://proxy.example.com"},
+        {"model_configs": {"missing-model": {"context_window": 1000}}},
+        {"model_configs": {"deepseek-chat": {"context_window": 0}}},
     ],
 )
 def test_model_provider_api_rejects_invalid_records(tmp_path, monkeypatch, overrides):
@@ -171,6 +253,151 @@ def test_latency_and_openai_compatible_model_discovery(tmp_path, monkeypatch):
     assert [item["id"] for item in models.json()["models"]] == ["model-a", "model-b"]
     assert seen_authorization == ["Bearer secret-never-echo"]
     assert "secret-never-echo" not in models.text
+
+
+def test_anthropic_model_discovery_uses_selected_protocol_headers(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(
+                {
+                    "path": self.path,
+                    "api_key": self.headers.get("x-api-key"),
+                    "version": self.headers.get("anthropic-version"),
+                    "authorization": self.headers.get("authorization"),
+                }
+            )
+            payload = json.dumps({"data": [{"id": "claude-sonnet"}]})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload.encode())))
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = TestClient(app).post(
+            "/api/model-providers/models",
+            json={
+                "base_url": f"http://127.0.0.1:{server.server_port}",
+                "api_key": "anthropic-secret",
+                "protocol": "ANTHROPIC",
+                "proxy_mode": "CUSTOM",
+                "proxy_url": "http://127.0.0.1:1",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    assert response.json()["protocol"] == "ANTHROPIC"
+    assert seen == [
+        {
+            "path": "/v1/models",
+            "api_key": "anthropic-secret",
+            "version": "2023-06-01",
+            "authorization": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize("protocol", ["OPENAI_COMPATIBLE", "ANTHROPIC"])
+def test_model_availability_runs_real_inference_with_current_configuration(
+    tmp_path, monkeypatch, protocol
+):
+    _patch_database(tmp_path, monkeypatch)
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            seen.append(
+                {
+                    "path": self.path,
+                    "authorization": self.headers.get("authorization"),
+                    "api_key": self.headers.get("x-api-key"),
+                    "body": body,
+                }
+            )
+            if protocol == "ANTHROPIC":
+                response_body = {
+                    "content": [{"type": "text", "text": "模型连接正常。"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 8, "output_tokens": 6},
+                }
+            else:
+                response_body = {
+                    "choices": [
+                        {
+                            "message": {"content": "模型连接正常。"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            payload = json.dumps(response_body, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = TestClient(app).post(
+            "/api/model-providers/test-model",
+            json={
+                "base_url": f"http://127.0.0.1:{server.server_port}",
+                "api_key": "model-test-secret",
+                "protocol": protocol,
+                "proxy_mode": "SYSTEM",
+                "model_name": "test-model",
+                "default_body": {
+                    "temperature": 0.2,
+                    "model": "must-be-overridden",
+                    "messages": [],
+                    "stream": True,
+                },
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["available"] is True
+    assert result["status_code"] == 200
+    assert result["output"] == "模型连接正常。"
+    assert "model-test-secret" not in response.text
+    request = seen[0]
+    assert request["body"]["model"] == "test-model"
+    assert request["body"]["messages"][0]["role"] == "user"
+    assert request["body"]["stream"] is False
+    assert request["body"]["temperature"] == 0.2
+    if protocol == "ANTHROPIC":
+        assert request["path"] == "/v1/messages"
+        assert request["api_key"] == "model-test-secret"
+        assert request["authorization"] is None
+        assert request["body"]["max_tokens"] == 8192
+    else:
+        assert request["path"] == "/chat/completions"
+        assert request["authorization"] == "Bearer model-test-secret"
+        assert request["api_key"] is None
 
 
 def test_model_discovery_error_never_echoes_api_key(tmp_path, monkeypatch):

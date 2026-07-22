@@ -34,11 +34,41 @@ def test_model_provider_frontend_implements_management_and_connection_flow():
     assert 'id="btn-model-provider-add"' in source
     assert 'id="model-provider-api-key" type="password"' in source
     assert 'id="model-provider-base-url" type="url"' in source
+    assert "未测试" not in source
+    assert source.count('id="model-provider-save"') == 1
+    assert source.index('id="model-provider-save"') < source.index('id="model-provider-form"')
+    assert 'id="model-provider-protocol"' in source
+    assert '>OpenAI</option>' in source
+    assert '>Anthropic</option>' in source
+    assert "function modelProviderProtocolLabel(protocol)" in source
+    assert 'id="model-provider-proxy-mode"' in source
+    assert '>SYSTEM</option>' in source
+    assert '>DIRECT</option>' in source
+    assert '>CUSTOM</option>' in source
+    assert 'id="model-provider-proxy-url"' in source
+    assert 'id="model-provider-proxy-username"' in source
+    assert 'id="model-provider-proxy-password" type="password"' in source
+    assert 'id="model-provider-skip-ssl" type="checkbox"' in source
+    assert 'model-provider-checkbox model-provider-ssl-setting' in source
+    assert 'class="model-provider-proxy-control"' in source
+    assert "skip_ssl_verify: connection.skip_ssl_verify" in source
+    assert "connection.proxy_mode === 'CUSTOM' && connection.skip_ssl_verify" not in source
     assert 'id="model-provider-add-model"' in source
     assert 'id="model-provider-discovered"' in source
     assert 'id="model-provider-manual"' in source
     assert "modelProviderState.selected.length" in source
-    assert "modelProviderState.protocol || 'MANUAL'" in source
+    assert 'data-configure-provider-model=' in source
+    assert 'data-test-provider-model=' in source
+    assert "API.post('/api/model-providers/test-model'" in source
+    assert "modelProviderState.modelTests[model] = result" in source
+    assert "test.available ? '✓' : '!'" in source
+    assert "model-provider-test-overlay" not in source
+    assert 'id="model-config-context-window"' in source
+    assert 'id="model-config-max-output"' in source
+    assert 'id="model-config-default-body"' in source
+    assert "model_configs: JSON.parse(JSON.stringify(modelProviderState.modelConfigs))" in source
+    assert "protocol: connection.protocol" in source
+    assert "'MANUAL'" not in source
 
 
 def test_model_provider_styles_use_existing_theme_contract_and_desktop_layout():
@@ -48,4 +78,5 @@ def test_model_provider_styles_use_existing_theme_contract_and_desktop_layout():
         assert token in source
     assert ':root[data-theme="dark"]' in source
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in source
+    assert "grid-template-columns: minmax(140px, 0.7fr) minmax(190px, 1.3fr)" in source
     assert "@media" not in source

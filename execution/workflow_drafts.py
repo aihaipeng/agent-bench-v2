@@ -87,56 +87,30 @@ class WorkflowNodeRunStatus(str, Enum):
     INTERRUPTED = "INTERRUPTED"
 
 
-def validate_complete_workflow_graph(
+def validate_workflow_graph(
     nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
 ) -> None:
-    """Require every business node to sit on a START-to-END path.
+    """Validate a DAG while allowing implicit sources and sinks.
 
     This is intentionally separate from the Pydantic draft model so existing
     drafts can still be opened. Callers invoke it at save and execution time.
     """
     node_by_id = {node.get("id"): node for node in nodes}
-    starts = [
-        node for node in nodes
-        if isinstance(node.get("data"), dict)
-        and node["data"].get("nodeType") == "START"
-    ]
-    ends = [
-        node for node in nodes
-        if isinstance(node.get("data"), dict)
-        and node["data"].get("nodeType") == "END"
-    ]
-    if len(starts) != 1:
-        raise ValueError(f"Workflow 必须包含且只能包含一个 START 节点，当前 {len(starts)} 个")
-    if len(ends) != 1:
-        raise ValueError(f"Workflow 必须包含且只能包含一个 END 节点，当前 {len(ends)} 个")
-
+    if not node_by_id:
+        raise ValueError("Workflow 至少需要一个节点")
     adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
-    reverse: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
+    degree: dict[str, int] = {node_id: 0 for node_id in node_by_id}
+    indegree: dict[str, int] = {node_id: 0 for node_id in node_by_id}
     for edge in edges:
         source, target = edge.get("source"), edge.get("target")
         if source in adjacency and target in adjacency:
-            adjacency[source].add(target)
-            reverse[target].add(source)
-
-    def walk(graph: dict[str, set[str]], origin: str) -> set[str]:
-        visited = {origin}
-        pending = [origin]
-        while pending:
-            current = pending.pop()
-            for neighbor in graph[current]:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    pending.append(neighbor)
-        return visited
-
-    start_id = starts[0]["id"]
-    end_id = ends[0]["id"]
-    reachable_from_start = walk(adjacency, start_id)
-    can_reach_end = walk(reverse, end_id)
-    orphaned = [
-        node for node in nodes
-        if node["id"] not in reachable_from_start or node["id"] not in can_reach_end
+            if target not in adjacency[source]:
+                adjacency[source].add(target)
+                indegree[target] += 1
+            degree[source] += 1
+            degree[target] += 1
+    orphaned = [] if len(nodes) == 1 else [
+        node for node in nodes if degree[node["id"]] == 0
     ]
     if orphaned:
         labels = [
@@ -144,6 +118,22 @@ def validate_complete_workflow_graph(
             for node in orphaned
         ]
         raise ValueError(f"Workflow 存在游离节点: {', '.join(labels)}")
+
+    pending = [node_id for node_id, count in indegree.items() if count == 0]
+    processed: set[str] = set()
+    while pending:
+        current = pending.pop()
+        processed.add(current)
+        for target in adjacency[current]:
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                pending.append(target)
+    if len(processed) != len(nodes):
+        labels = [
+            str((node.get("data") or {}).get("label") or node["id"])
+            for node in nodes if node["id"] not in processed
+        ]
+        raise ValueError(f"Workflow 存在循环依赖: {', '.join(labels)}")
 
 
 class WorkflowNodeRunRecord(_WorkflowModel):

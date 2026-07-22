@@ -4,10 +4,17 @@ import json
 import httpx
 
 from execution import (
+    DEFAULT_ANTHROPIC_MAX_TOKENS,
+    anthropic_messages_url,
+    build_anthropic_request,
     build_chat_completion_request,
     chat_completions_url,
     deep_merge_model_request,
+    invoke_anthropic,
     invoke_openai_compatible,
+    is_internal_ip_url,
+    model_http_client_options,
+    parse_anthropic_response,
     parse_openai_compatible_response,
 )
 
@@ -91,6 +98,115 @@ def test_chat_completions_url_preserves_gateway_base_path():
     ) == "https://gateway.example/v1/chat/completions"
 
 
+def test_anthropic_request_uses_required_default_and_user_overrides():
+    request = build_anthropic_request(
+        model_name="claude-sonnet",
+        system_prompt="Follow policy",
+        messages=[{"role": "user", "content": "Review this"}],
+        model_defaults={"temperature": 0.2, "metadata": {"source": "default"}},
+        model_parameters={
+            "max_tokens": 16384,
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "metadata": {"case": "42"},
+        },
+    )
+
+    assert request == {
+        "model": "claude-sonnet",
+        "system": "Follow policy",
+        "messages": [{"role": "user", "content": "Review this"}],
+        "max_tokens": 16384,
+        "stream": False,
+        "temperature": 0.2,
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+        "metadata": {"source": "default", "case": "42"},
+    }
+    assert DEFAULT_ANTHROPIC_MAX_TOKENS >= 8192
+    assert build_anthropic_request(
+        model_name="claude-sonnet",
+        messages=[{"role": "user", "content": "hello"}],
+    )["max_tokens"] == DEFAULT_ANTHROPIC_MAX_TOKENS
+
+
+def test_anthropic_url_and_internal_network_client_policy():
+    assert anthropic_messages_url("https://api.anthropic.com") == (
+        "https://api.anthropic.com/v1/messages"
+    )
+    assert anthropic_messages_url("https://gateway.example/anthropic/v1") == (
+        "https://gateway.example/anthropic/v1/messages"
+    )
+    assert anthropic_messages_url("https://gateway.example/v1/messages") == (
+        "https://gateway.example/v1/messages"
+    )
+    assert is_internal_ip_url("https://10.20.30.40:8443/v1") is True
+    assert is_internal_ip_url("http://127.0.0.1:8000") is True
+    assert is_internal_ip_url("https://[fd00::1]/v1") is True
+    assert is_internal_ip_url("https://api.anthropic.com") is False
+
+    internal = model_http_client_options(
+        "https://10.20.30.40:8443/v1", timeout_seconds=120
+    )
+    public = model_http_client_options(
+        "https://api.anthropic.com", timeout_seconds=120
+    )
+    assert internal == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "trust_env": False,
+    }
+    assert public == {"follow_redirects": True, "timeout": 120}
+    assert model_http_client_options(
+        "https://api.anthropic.com",
+        timeout_seconds=120,
+        proxy_mode="DIRECT",
+    ) == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "trust_env": False,
+    }
+    assert model_http_client_options(
+        "https://api.anthropic.com",
+        timeout_seconds=120,
+        proxy_mode="SYSTEM",
+        skip_ssl_verify=True,
+    ) == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "verify": False,
+    }
+    assert model_http_client_options(
+        "https://10.20.30.40:8443/v1",
+        timeout_seconds=120,
+        skip_ssl_verify=True,
+    ) == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "trust_env": False,
+        "verify": False,
+    }
+    assert model_http_client_options(
+        "https://api.anthropic.com",
+        timeout_seconds=120,
+        proxy_mode="CUSTOM",
+        proxy_url="http://proxy.internal:8080",
+        proxy_username="domain user",
+        proxy_password="p@ss:word",
+        skip_ssl_verify=True,
+    ) == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "trust_env": False,
+        "proxy": "http://domain%20user:p%40ss%3Aword@proxy.internal:8080",
+        "verify": False,
+    }
+    assert model_http_client_options(
+        "https://10.20.30.40:8443/v1",
+        timeout_seconds=120,
+        proxy_mode="CUSTOM",
+        proxy_url="http://proxy.internal:8080",
+    ) == internal
+
+
 def test_openai_compatible_transport_forwards_body_without_parameter_translation():
     captured = {}
 
@@ -126,6 +242,60 @@ def test_openai_compatible_transport_forwards_body_without_parameter_translation
             "enable_thinking": True,
             "vendor_extension": {"level": "high"},
         },
+    }
+
+
+def test_anthropic_transport_and_response_parser_keep_native_contract():
+    captured = {}
+    native_response = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "internal"},
+            {"type": "text", "text": "policy "},
+            {"type": "text", "text": "failed"},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 12, "output_tokens": 8},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers["x-api-key"]
+        captured["version"] = request.headers["anthropic-version"]
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=native_response)
+
+    async def invoke():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await invoke_anthropic(
+                base_url="https://gateway.example/anthropic/v1",
+                api_key="anthropic-secret",
+                request_body={
+                    "model": "claude-sonnet",
+                    "messages": [{"role": "user", "content": "review"}],
+                    "max_tokens": 8192,
+                },
+                client=client,
+            )
+
+    response = asyncio.run(invoke())
+
+    assert captured == {
+        "url": "https://gateway.example/anthropic/v1/messages",
+        "api_key": "anthropic-secret",
+        "version": "2023-06-01",
+        "body": {
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "review"}],
+            "max_tokens": 8192,
+        },
+    }
+    assert parse_anthropic_response(response) == {
+        "output": "policy failed",
+        "usage": {"input_tokens": 12, "output_tokens": 8},
+        "finish_reason": "end_turn",
     }
 
 

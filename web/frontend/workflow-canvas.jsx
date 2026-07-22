@@ -97,40 +97,40 @@ function cloneValue(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-function validateCompleteWorkflowGraph(nodes, edges) {
-    const starts = nodes.filter((node) => node.data?.nodeType === 'START');
-    const ends = nodes.filter((node) => node.data?.nodeType === 'END');
-    if (starts.length !== 1) return `Workflow 必须包含且只能包含一个 START 节点，当前 ${starts.length} 个`;
-    if (ends.length !== 1) return `Workflow 必须包含且只能包含一个 END 节点，当前 ${ends.length} 个`;
+function validateWorkflowGraph(nodes, edges) {
+    if (!nodes.length) return 'Workflow 至少需要一个节点';
     const adjacency = new Map(nodes.map((node) => [node.id, new Set()]));
-    const reverse = new Map(nodes.map((node) => [node.id, new Set()]));
+    const degree = new Map(nodes.map((node) => [node.id, 0]));
+    const indegree = new Map(nodes.map((node) => [node.id, 0]));
     edges.forEach((edge) => {
         if (!adjacency.has(edge.source) || !adjacency.has(edge.target)) return;
-        adjacency.get(edge.source).add(edge.target);
-        reverse.get(edge.target).add(edge.source);
-    });
-    const walk = (graph, origin) => {
-        const visited = new Set([origin]);
-        const pending = [origin];
-        while (pending.length) {
-            const current = pending.pop();
-            graph.get(current).forEach((neighbor) => {
-                if (!visited.has(neighbor)) {
-                    visited.add(neighbor);
-                    pending.push(neighbor);
-                }
-            });
+        if (!adjacency.get(edge.source).has(edge.target)) {
+            adjacency.get(edge.source).add(edge.target);
+            indegree.set(edge.target, indegree.get(edge.target) + 1);
         }
-        return visited;
-    };
-    const reachableFromStart = walk(adjacency, starts[0].id);
-    const canReachEnd = walk(reverse, ends[0].id);
-    const orphaned = nodes.filter((node) => (
-        !reachableFromStart.has(node.id) || !canReachEnd.has(node.id)
-    ));
-    if (!orphaned.length) return '';
-    const labels = orphaned.map((node) => node.data?.label || node.id).join(', ');
-    return `Workflow 存在游离节点: ${labels}`;
+        degree.set(edge.source, degree.get(edge.source) + 1);
+        degree.set(edge.target, degree.get(edge.target) + 1);
+    });
+    const orphaned = nodes.length === 1 ? [] : nodes.filter((node) => degree.get(node.id) === 0);
+    if (orphaned.length) {
+        const labels = orphaned.map((node) => node.data?.label || node.id).join(', ');
+        return `Workflow 存在游离节点: ${labels}`;
+    }
+    const pending = nodes.filter((node) => indegree.get(node.id) === 0).map((node) => node.id);
+    const processed = new Set();
+    while (pending.length) {
+        const current = pending.pop();
+        processed.add(current);
+        adjacency.get(current).forEach((target) => {
+            indegree.set(target, indegree.get(target) - 1);
+            if (indegree.get(target) === 0) pending.push(target);
+        });
+    }
+    if (processed.size !== nodes.length) {
+        const labels = nodes.filter((node) => !processed.has(node.id)).map((node) => node.data?.label || node.id).join(', ');
+        return `Workflow 存在循环依赖: ${labels}`;
+    }
+    return '';
 }
 
 function isPlainObject(value) {
@@ -378,21 +378,16 @@ function layoutGraph(nodes, edges) {
 }
 
 function initialGraph() {
-    const start = makeNode('START', {x: 60, y: 280}, {label: '开始'});
     const request = makeNode('HTTP', {x: 360, y: 280}, {label: '调用业务接口'});
     const agent = makeNode('AGENT', {x: 675, y: 280}, {label: '执行企业 Agent'});
     const llm = makeNode('LLM', {x: 990, y: 100}, {label: '模型质量判断'});
     const script = makeNode('SCRIPT', {x: 990, y: 420}, {label: '规则校验'});
-    const end = makeNode('END', {x: 1305, y: 260}, {label: '完成'});
     return {
-        nodes: [start, request, agent, llm, script, end],
+        nodes: [request, agent, llm, script],
         edges: [
-            makeEdge(start.id, request.id),
             makeEdge(request.id, agent.id),
             makeEdge(agent.id, llm.id),
             makeEdge(agent.id, script.id),
-            makeEdge(llm.id, end.id),
-            makeEdge(script.id, end.id),
         ],
     };
 }
@@ -479,8 +474,8 @@ function WorkflowNode({data, selected}) {
     );
 }
 
-function NodePicker({onSelect, compact = false}) {
-    const types = INSERTABLE_TYPES;
+function NodePicker({onSelect, compact = false, includeSystem = false}) {
+    const types = includeSystem ? ['START', 'END', ...INSERTABLE_TYPES] : INSERTABLE_TYPES;
     return (
         <div className={`wf-node-picker ${compact ? 'is-compact' : ''}`} role="menu">
             {types.map((type) => {
@@ -525,6 +520,13 @@ function ContextMenu({menu, canPaste, onAction, onAdd}) {
     const [submenuOpen, setSubmenuOpen] = useState(false);
     useEffect(() => setSubmenuOpen(false), [menu?.kind, menu?.x, menu?.y]);
     if (!menu) return null;
+    if (menu.kind === 'edge') {
+        return (
+            <div className="wf-context-menu" style={{left: menu.x, top: menu.y}} role="menu" data-testid="edge-context-menu">
+                <button type="button" className="is-danger" onClick={() => onAction('delete-edge')}><Trash2 size={15} /><span>删除连线</span></button>
+            </div>
+        );
+    }
     if (menu.kind === 'node') {
         return (
             <div className="wf-context-menu" style={{left: menu.x, top: menu.y}} role="menu" data-testid="node-context-menu">
@@ -540,7 +542,7 @@ function ContextMenu({menu, canPaste, onAction, onAdd}) {
         <div className="wf-context-menu" style={{left: menu.x, top: menu.y}} role="menu" data-testid="pane-context-menu">
             <div className={`wf-context-submenu-trigger ${submenuOpen ? 'is-open' : ''}`}>
                 <button type="button" aria-expanded={submenuOpen} onClick={() => setSubmenuOpen((open) => !open)}><Plus size={15} /><span>添加节点</span><ChevronRight size={14} /></button>
-                <div className="wf-context-submenu"><NodePicker onSelect={onAdd} /></div>
+                <div className="wf-context-submenu"><NodePicker onSelect={onAdd} includeSystem /></div>
             </div>
             <button type="button" onClick={() => onAction('test-run')}><Zap size={15} /><span>测试运行</span></button>
             <button type="button" className="is-danger" onClick={() => onAction('interrupt-workflow')}><Square size={15} /><span>中断测试</span></button>
@@ -1185,6 +1187,7 @@ function WorkflowStudio({options}) {
     const [nodes, setNodes, onNodesChange] = useNodesState(graph.nodes);
     const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
     const [selectedNodeIds, setSelectedNodeIds] = useState([]);
+    const [selectedEdgeIds, setSelectedEdgeIds] = useState([]);
     const [editorNodeId, setEditorNodeId] = useState(null);
     const [contextMenu, setContextMenu] = useState(null);
     const [insertEdgeId, setInsertEdgeId] = useState(null);
@@ -1242,16 +1245,18 @@ function WorkflowStudio({options}) {
         loadModelProviders();
     }, [loadModelProviders]);
 
-    const persistDraft = useCallback(async () => {
+    const persistDraft = useCallback(async ({forNodeRun = false} = {}) => {
         if (!options.onPersist) throw new Error('Workflow 持久化入口不可用');
         const name = workflowName.trim();
         if (!name) throw new Error('Workflow 名称不能为空');
-        const graphError = validateCompleteWorkflowGraph(nodes, edges);
-        if (graphError) {
-            setSaveState('保存失败');
-            throw new Error(graphError);
+        if (!forNodeRun) {
+            const graphError = validateWorkflowGraph(nodes, edges);
+            if (graphError) {
+                setSaveState('保存失败');
+                throw new Error(graphError);
+            }
         }
-        setSaveState('正在保存');
+        if (!forNodeRun) setSaveState('正在保存');
         try {
             const saved = await options.onPersist({
                 id: workflowId,
@@ -1260,16 +1265,19 @@ function WorkflowStudio({options}) {
                 nodes: nodes.map(serializableNode),
                 edges: edges.map(serializableEdge),
                 global_variables: cloneValue(globalVariables),
+                forNodeRun,
             });
             setWorkflowId(saved.id);
-            setSaveState('已保存');
-            setNodes((current) => current.map((node) => ({
-                ...node,
-                data: {...node.data, isDirty: false},
-            })));
+            if (!forNodeRun) {
+                setSaveState('已保存');
+                setNodes((current) => current.map((node) => ({
+                    ...node,
+                    data: {...node.data, isDirty: false},
+                })));
+            }
             return saved.id;
         } catch (error) {
-            setSaveState('保存失败');
+            if (!forNodeRun) setSaveState('保存失败');
             throw error;
         }
     }, [edges, globalVariables, nodes, options, setNodes, workflowId, workflowName]);
@@ -1379,11 +1387,6 @@ function WorkflowStudio({options}) {
 
     const runNode = useCallback(async (id) => {
         if (activeNodeRuns.current.has(id)) return 'RUNNING';
-        const graphError = validateCompleteWorkflowGraph(nodes, edges);
-        if (graphError) {
-            if (window.showToast) window.showToast(graphError, 'error');
-            return 'FAILED';
-        }
         const targetNode = nodes.find((node) => node.id === id);
         if (!targetNode) return 'FAILED';
         const active = {workflowId: null, interruptRequested: false};
@@ -1433,7 +1436,7 @@ function WorkflowStudio({options}) {
         }, 100);
         try {
             if (!isExecutable) return markLocalFinished(active.interruptRequested ? 'INTERRUPTED' : 'SUCCESS');
-            const activeWorkflowId = await persistDraft();
+            const activeWorkflowId = await persistDraft({forNodeRun: true});
             active.workflowId = activeWorkflowId;
             if (active.interruptRequested) return markLocalFinished('INTERRUPTED');
             const streaming = targetNode.data.nodeType === 'LLM' && targetNode.data.modelParameters?.stream === true;
@@ -1559,7 +1562,7 @@ function WorkflowStudio({options}) {
 
     const runAll = useCallback(async () => {
         if (workflowRunRef.current.active) return;
-        const graphError = validateCompleteWorkflowGraph(nodes, edges);
+        const graphError = validateWorkflowGraph(nodes, edges);
         if (graphError) {
             if (window.showToast) window.showToast(graphError, 'error');
             return;
@@ -1637,16 +1640,23 @@ function WorkflowStudio({options}) {
         }
     }, [closeMenus, edges, nodes, runNode, setNodes]);
 
-    const deleteNodes = useCallback((ids) => {
-        const idSet = new Set(ids);
-        if (!idSet.size) return;
+    const deleteElements = useCallback((nodeIds = [], edgeIds = []) => {
+        const nodeIdSet = new Set(nodeIds);
+        const edgeIdSet = new Set(edgeIds);
+        if (!nodeIdSet.size && !edgeIdSet.size) return;
         recordHistory();
-        setNodes((current) => current.filter((node) => !idSet.has(node.id)));
-        setEdges((current) => current.filter((edge) => !idSet.has(edge.source) && !idSet.has(edge.target)));
-        setEditorNodeId((current) => idSet.has(current) ? null : current);
-        setSelectedNodeIds((current) => current.filter((id) => !idSet.has(id)));
+        setNodes((current) => current.filter((node) => !nodeIdSet.has(node.id)));
+        setEdges((current) => current.filter((edge) => (
+            !edgeIdSet.has(edge.id) && !nodeIdSet.has(edge.source) && !nodeIdSet.has(edge.target)
+        )));
+        setEditorNodeId((current) => nodeIdSet.has(current) ? null : current);
+        setSelectedNodeIds((current) => current.filter((id) => !nodeIdSet.has(id)));
+        setSelectedEdgeIds((current) => current.filter((id) => !edgeIdSet.has(id)));
         closeMenus();
     }, [closeMenus, recordHistory, setEdges, setNodes]);
+
+    const deleteNodes = useCallback((ids) => deleteElements(ids, []), [deleteElements]);
+    const deleteEdges = useCallback((ids) => deleteElements([], ids), [deleteElements]);
 
     const deleteNode = useCallback((id) => deleteNodes([id]), [deleteNodes]);
 
@@ -1762,6 +1772,7 @@ function WorkflowStudio({options}) {
         );
         if (isTextEntry) return;
         const selectedIds = nodes.filter((node) => node.selected).map((node) => node.id);
+        const selectedEdges = edges.filter((edge) => edge.selected).map((edge) => edge.id);
         const control = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
         if (control && key === 'z') {
@@ -1785,11 +1796,11 @@ function WorkflowStudio({options}) {
             pasteClipboard();
             return;
         }
-        if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIds.length) {
+        if ((event.key === 'Delete' || event.key === 'Backspace') && (selectedIds.length || selectedEdges.length)) {
             event.preventDefault();
-            deleteNodes(selectedIds);
+            deleteElements(selectedIds, selectedEdges);
         }
-    }, [clipboard, copyNodes, deleteNodes, nodes, pasteClipboard, redo, undo]);
+    }, [clipboard, copyNodes, deleteElements, edges, nodes, pasteClipboard, redo, undo]);
 
     const handleCopy = useCallback((event) => {
         const target = event.target;
@@ -1876,8 +1887,9 @@ function WorkflowStudio({options}) {
         if (action === 'interrupt-node' && contextMenu?.nodeId) interruptNode(contextMenu.nodeId);
         if (action === 'copy-node' && contextMenu?.nodeId) copyNode(contextMenu.nodeId);
         if (action === 'delete-node' && contextMenu?.nodeId) deleteNode(contextMenu.nodeId);
+        if (action === 'delete-edge' && contextMenu?.edgeId) deleteEdges([contextMenu.edgeId]);
         if (action !== 'paste-node') setContextMenu(null);
-    }, [contextMenu, copyNode, deleteNode, interruptNode, interruptWorkflow, pasteNode, runAll, runNode]);
+    }, [contextMenu, copyNode, deleteEdges, deleteNode, interruptNode, interruptWorkflow, pasteNode, runAll, runNode]);
 
     const autoLayout = useCallback(() => {
         recordHistory();
@@ -1982,7 +1994,19 @@ function WorkflowStudio({options}) {
                     onNodeDragStart={recordHistory}
                     onPaneClick={closeMenus}
                     onNodeClick={handleNodeClick}
-                    onSelectionChange={({nodes: selectedNodes}) => setSelectedNodeIds(selectedNodes.map((node) => node.id))}
+                    onSelectionChange={({nodes: selectedNodes, edges: selectedEdges}) => {
+                        setSelectedNodeIds(selectedNodes.map((node) => node.id));
+                        setSelectedEdgeIds(selectedEdges.map((edge) => edge.id));
+                    }}
+                    onEdgeClick={(event, edge) => {
+                        event.stopPropagation();
+                        document.querySelector('.workflow-studio-shell')?.focus();
+                        setNodes((current) => current.map((node) => ({...node, selected: false})));
+                        setEdges((current) => current.map((item) => ({...item, selected: item.id === edge.id})));
+                        setSelectedNodeIds([]);
+                        setSelectedEdgeIds([edge.id]);
+                        closeMenus();
+                    }}
                     onNodeDoubleClick={(event, node) => {
                         event.preventDefault();
                         closeMenus();
@@ -2009,6 +2033,22 @@ function WorkflowStudio({options}) {
                             nodeId: node.id,
                             x: Math.max(8, Math.min(event.clientX, window.innerWidth - 205)),
                             y: Math.max(66, Math.min(event.clientY, window.innerHeight - 155)),
+                        });
+                        setInsertEdgeId(null);
+                    }}
+                    onEdgeContextMenu={(event, edge) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        document.querySelector('.workflow-studio-shell')?.focus();
+                        setNodes((current) => current.map((node) => ({...node, selected: false})));
+                        setEdges((current) => current.map((item) => ({...item, selected: item.id === edge.id})));
+                        setSelectedNodeIds([]);
+                        setSelectedEdgeIds([edge.id]);
+                        setContextMenu({
+                            kind: 'edge',
+                            edgeId: edge.id,
+                            x: Math.max(8, Math.min(event.clientX, window.innerWidth - 205)),
+                            y: Math.max(66, Math.min(event.clientY, window.innerHeight - 110)),
                         });
                         setInsertEdgeId(null);
                     }}

@@ -207,8 +207,8 @@ def test_workflow_draft_api_rejects_invalid_graph(tmp_path, monkeypatch, body):
     assert TestClient(app).post("/api/workflow-drafts", json=body).status_code == 422
 
 
-@pytest.mark.parametrize("mode", ["no_edges", "unreachable", "dead_end"])
-def test_workflow_draft_api_rejects_nodes_outside_start_end_path(
+@pytest.mark.parametrize("mode", ["isolated", "cycle"])
+def test_workflow_draft_api_rejects_isolated_nodes_and_cycles(
     tmp_path, monkeypatch, mode
 ):
     _patch_database(tmp_path, monkeypatch)
@@ -219,22 +219,32 @@ def test_workflow_draft_api_rejects_nodes_outside_start_end_path(
         "position": {"x": 200, "y": 160},
         "data": {"nodeType": "SCRIPT", "label": "游离脚本"},
     }
-    if mode == "no_edges":
-        body["edges"] = []
+    if mode == "isolated":
+        body["nodes"].append(orphan)
     else:
         body["nodes"].append(orphan)
-        body["edges"].append({
-            "id": f"orphan-{mode}",
-            "source": "script-orphan" if mode == "unreachable" else "llm-1",
-            "target": "end" if mode == "unreachable" else "script-orphan",
-        })
+        body["edges"].extend([
+            {"id": "llm-script", "source": "llm-1", "target": "script-orphan"},
+            {"id": "script-llm", "source": "script-orphan", "target": "llm-1"},
+        ])
 
     response = TestClient(app).post("/api/workflow-drafts", json=body)
 
     assert response.status_code == 422
-    assert "Workflow 存在游离节点" in response.text
-    if mode != "no_edges":
+    assert f"Workflow 存在{'游离节点' if mode == 'isolated' else '循环依赖'}" in response.text
+    if mode == "isolated":
         assert "游离脚本" in response.text
+
+
+def test_workflow_draft_accepts_single_node_without_system_nodes(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
+    body = _graph_body()
+    body["nodes"] = [body["nodes"][0]]
+    body["edges"] = []
+
+    response = TestClient(app).post("/api/workflow-drafts", json=body)
+
+    assert response.status_code == 200
 
 
 def test_workflow_draft_accepts_parallel_complete_paths(tmp_path, monkeypatch):
@@ -257,7 +267,7 @@ def test_workflow_draft_accepts_parallel_complete_paths(tmp_path, monkeypatch):
     assert response.status_code == 200
 
 
-def test_update_and_run_api_cannot_bypass_complete_path_validation(
+def test_explicit_save_rejects_incomplete_graph_but_single_node_run_allows_it(
     tmp_path, monkeypatch
 ):
     database_path = _patch_database(tmp_path, monkeypatch)
@@ -273,6 +283,12 @@ def test_update_and_run_api_cannot_bypass_complete_path_validation(
     assert update.status_code == 422
     assert client.get(f"/api/workflow-drafts/{created['id']}").json()["workflow"]["name"] == "客服评测流程"
 
+    node_run_snapshot = client.put(
+        f"/api/workflow-drafts/{created['id']}?for_node_run=true",
+        json=invalid_update,
+    )
+    assert node_run_snapshot.status_code == 200
+
     historical = _graph_body(name="historical invalid")
     historical["nodes"] = [historical["nodes"][0]]
     historical["edges"] = []
@@ -282,8 +298,9 @@ def test_update_and_run_api_cannot_bypass_complete_path_validation(
     run = client.post(
         "/api/workflow-drafts/historical-invalid/nodes/llm-1/runs"
     )
-    assert run.status_code == 422
-    assert "START" in run.text
+    assert run.status_code == 200
+    assert run.json()["run"]["status"] == "FAILED"
+    assert run.json()["run"]["error"]["message"] == "用户提示词解析后不能为空"
 
 
 def test_workflow_draft_rejects_visible_variable_name_conflicts(tmp_path, monkeypatch):

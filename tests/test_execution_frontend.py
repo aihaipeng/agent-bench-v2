@@ -19,8 +19,8 @@ def test_execution_assets_and_navigation_are_registered():
     assert 'data-view="runs"' not in index_html
     assert "运行中心" not in index_html
     assert '<link rel="stylesheet" href="/execution.css" />' in index_html
-    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=29" />' in index_html
-    assert '<script src="/assets/workflow-canvas.js?v=29"></script>' in index_html
+    assert '<link rel="stylesheet" href="/assets/workflow-canvas.css?v=31" />' in index_html
+    assert '<script src="/assets/workflow-canvas.js?v=31"></script>' in index_html
     assert '<script src="/execution.js"></script>' in index_html
     assert 'name="viewport"' not in index_html
     assert "viewTargets();" in app_js
@@ -82,7 +82,7 @@ def test_workflow_list_uses_persistent_drafts_without_legacy_api():
     assert "API.del('/api/workflows/bindings/'" not in execution_js
     assert "API.get('/api/workflow-drafts')" in execution_js
     assert "API.get('/api/workflow-drafts/'" in execution_js
-    assert "API.post('/api/workflow-drafts', body)" in execution_js
+    assert "API.post('/api/workflow-drafts' + query, body)" in execution_js
     assert "API.put('/api/workflow-drafts/'" in execution_js
     assert "已持久化" in execution_js
     assert "id=\"workflow-search\"" in execution_js
@@ -174,11 +174,15 @@ def test_workflow_editor_uses_fullscreen_react_flow_canvas():
     assert "正在接收原始响应…" in canvas_jsx
     assert "text.length > 180" in canvas_jsx
     assert "const NODE_STATUSES = ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'INTERRUPTED']" in canvas_jsx
-    assert "function validateCompleteWorkflowGraph(nodes, edges)" in canvas_jsx
+    assert "function validateWorkflowGraph(nodes, edges)" in canvas_jsx
     assert "Workflow 存在游离节点" in canvas_jsx
-    assert "const reachableFromStart = walk(adjacency, starts[0].id)" in canvas_jsx
-    assert "const canReachEnd = walk(reverse, ends[0].id)" in canvas_jsx
-    assert canvas_jsx.count("validateCompleteWorkflowGraph(nodes, edges)") >= 4
+    assert "Workflow 存在循环依赖" in canvas_jsx
+    assert "const orphaned = nodes.length === 1 ? []" in canvas_jsx
+    assert canvas_jsx.count("validateWorkflowGraph(nodes, edges)") >= 3
+    assert "const persistDraft = useCallback(async ({forNodeRun = false} = {})" in canvas_jsx
+    assert "const activeWorkflowId = await persistDraft({forNodeRun: true})" in canvas_jsx
+    assert "if (!forNodeRun)" in canvas_jsx
+    assert "draft.forNodeRun ? '?for_node_run=true' : ''" in execution_js
     assert "status: 'PENDING'" in canvas_jsx
     assert "status: 'RUNNING'" in canvas_jsx
     assert "SUCCESS" in canvas_jsx
@@ -252,6 +256,7 @@ def test_workflow_canvas_has_required_context_menus_and_edge_insert():
         "运行此步骤",
         "拷贝",
         "删除",
+        "删除连线",
     ):
         assert label in canvas_jsx
     for node_type in ("START", "HTTP", "AGENT", "LLM", "SCRIPT", "END"):
@@ -263,6 +268,11 @@ def test_workflow_canvas_has_required_context_menus_and_edge_insert():
     assert "wf-edge-plus" in canvas_jsx
     assert "onToggleInsert" in canvas_jsx
     assert "onInsert" in canvas_jsx
+    assert "onEdgeClick" in canvas_jsx
+    assert "onEdgeContextMenu" in canvas_jsx
+    assert "selectedEdgeIds" in canvas_jsx
+    assert "deleteElements(selectedIds, selectedEdges)" in canvas_jsx
+    assert "includeSystem" in canvas_jsx
     assert ".wf-context-menu" in canvas_css
     assert ".wf-edge-picker" in canvas_css
 

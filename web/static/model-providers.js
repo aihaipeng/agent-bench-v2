@@ -5,12 +5,18 @@ var modelProviderState = {
     editingId: null,
     discovered: [],
     selected: [],
-    protocol: null,
+    protocol: 'OPENAI_COMPATIBLE',
     endpoint: null,
+    modelConfigs: {},
+    modelTests: {},
 };
 
 function modelProviderName(provider) {
     return provider.name || '未命名供应商';
+}
+
+function modelProviderProtocolLabel(protocol) {
+    return protocol === 'ANTHROPIC' ? 'Anthropic' : 'OpenAI';
 }
 
 function filteredModelProviders() {
@@ -46,7 +52,7 @@ function renderModelProviderRows() {
             '<td><button class="execution-name-button" type="button" data-provider-edit="' + escAttr(provider.id) + '">' + esc(modelProviderName(provider)) + '</button>' + website +
                 '<div class="execution-id">' + esc(provider.id) + '</div></td>' +
             '<td><span class="model-provider-url" title="' + escAttr(provider.base_url) + '">' + esc(provider.base_url) + '</span></td>' +
-            '<td><span class="model-provider-protocol is-' + escAttr(provider.protocol.toLowerCase()) + '">' + esc(provider.protocol) + '</span></td>' +
+            '<td><span class="model-provider-protocol is-' + escAttr(provider.protocol.toLowerCase()) + '">' + esc(modelProviderProtocolLabel(provider.protocol)) + '</span></td>' +
             '<td><div class="model-provider-model-preview">' + modelPreview + '</div></td>' +
             '<td>' + esc(formatDateTime(provider.updated_at)) + '</td>' +
             '<td><div class="execution-row-actions">' +
@@ -110,25 +116,33 @@ function modelProviderEditorMarkup(provider) {
         '<header class="model-provider-editor-header">' +
             '<button class="btn btn-sm" id="model-provider-back" type="button">' + icon('back') + '返回</button>' +
             '<div class="model-provider-editor-heading"><span>MODEL PROVIDER</span><h1 id="model-provider-editor-title">' + (isEditing ? '编辑模型供应商' : '新增模型供应商') + '</h1></div>' +
-            '<span class="model-connection-badge is-idle" id="model-connection-badge">未测试</span>' +
+            '<button id="model-provider-save" type="button" class="btn btn-primary model-provider-header-save">保存</button>' +
         '</header>' +
         '<form id="model-provider-form" class="model-provider-form">' +
             '<label class="model-provider-field"><span>供应商名称 <small>选填</small></span><input class="input" id="model-provider-name" maxlength="120" placeholder="例如：企业模型网关" value="' + escAttr(provider && provider.name || '') + '" /></label>' +
             '<label class="model-provider-field"><span>官网链接 <small>选填</small></span><input class="input" id="model-provider-website" type="url" maxlength="2048" placeholder="https://example.com" value="' + escAttr(provider && provider.website_url || '') + '" /></label>' +
             '<label class="model-provider-field"><span>API Key <b>*</b></span><span class="model-provider-key-wrap"><input class="input" id="model-provider-api-key" type="password" maxlength="4096" autocomplete="off" required placeholder="输入 API Key" value="' + escAttr(provider && provider.api_key || '') + '" /><button id="model-provider-key-toggle" type="button" aria-label="显示 API Key" title="显示 API Key">显示</button></span></label>' +
             '<label class="model-provider-field"><span>BASE_URL <b>*</b></span><input class="input" id="model-provider-base-url" type="url" maxlength="2048" required placeholder="https://api.example.com" value="' + escAttr(provider && provider.base_url || '') + '" /></label>' +
+            '<label class="model-provider-field"><span>协议 <b>*</b></span><select class="input" id="model-provider-protocol"><option value="OPENAI_COMPATIBLE"' + ((provider && provider.protocol) === 'ANTHROPIC' ? '' : ' selected') + '>OpenAI</option><option value="ANTHROPIC"' + ((provider && provider.protocol) === 'ANTHROPIC' ? ' selected' : '') + '>Anthropic</option></select></label>' +
+            '<div class="model-provider-field model-provider-proxy-setting"><span>代理模式 <b>*</b></span><div class="model-provider-proxy-control">' +
+                '<select class="input" id="model-provider-proxy-mode" aria-label="代理模式"><option value="SYSTEM"' + ((provider && provider.proxy_mode) === 'DIRECT' || (provider && provider.proxy_mode) === 'CUSTOM' ? '' : ' selected') + '>SYSTEM</option><option value="DIRECT"' + ((provider && provider.proxy_mode) === 'DIRECT' ? ' selected' : '') + '>DIRECT</option><option value="CUSTOM"' + ((provider && provider.proxy_mode) === 'CUSTOM' ? ' selected' : '') + '>CUSTOM</option></select>' +
+                '<label class="model-provider-checkbox model-provider-ssl-setting"><input id="model-provider-skip-ssl" type="checkbox"' + (provider && provider.skip_ssl_verify ? ' checked' : '') + ' /><span>跳过 SSL 证书验证</span></label>' +
+            '</div></div>' +
+            '<section class="model-provider-proxy-fields' + ((provider && provider.proxy_mode) === 'CUSTOM' ? '' : ' is-hidden') + '" id="model-provider-proxy-fields">' +
+                '<label class="model-provider-field"><span>代理地址 <b>*</b></span><input class="input" id="model-provider-proxy-url" maxlength="2048" placeholder="http://proxy.corp.com:8080" value="' + escAttr(provider && provider.proxy_url || '') + '" /></label>' +
+                '<label class="model-provider-field"><span>代理用户名 <small>选填</small></span><input class="input" id="model-provider-proxy-username" maxlength="512" autocomplete="off" value="' + escAttr(provider && provider.proxy_username || '') + '" /></label>' +
+                '<label class="model-provider-field"><span>代理密码 <small>选填</small></span><input class="input" id="model-provider-proxy-password" type="password" maxlength="4096" autocomplete="off" value="' + escAttr(provider && provider.proxy_password || '') + '" /></label>' +
+            '</section>' +
         '</form>' +
         '<div class="model-provider-actions">' +
             '<button id="model-provider-latency" type="button" class="btn" data-default-label="测速">测速</button>' +
             '<button id="model-provider-fetch" type="button" class="btn btn-primary" data-default-label="获取模型">获取模型</button>' +
             '<button id="model-provider-add-model" type="button" class="btn"' + (isEditing ? '' : ' disabled') + '>' + icon('add') + '添加模型</button>' +
-            '<span class="model-provider-action-spacer"></span>' +
-            '<button id="model-provider-save" type="button" class="btn btn-primary">保存</button>' +
         '</div>' +
         '<section class="model-provider-status" aria-label="连接状态">' +
             '<div class="model-provider-status-main"><span class="model-provider-status-mark" aria-hidden="true"></span><div><span>连接状态</span><strong id="model-provider-status-title">等待测试</strong></div></div>' +
             '<div class="model-provider-metric"><span>访问延迟</span><strong id="model-provider-latency-value">--</strong></div>' +
-            '<div class="model-provider-metric model-provider-metric-wide"><span>协议 / 模型端点</span><strong id="model-provider-protocol-value">' + esc(provider && provider.protocol || '--') + '</strong><small id="model-provider-endpoint-value">' + esc(provider && provider.model_endpoint || '尚未获取模型') + '</small></div>' +
+            '<div class="model-provider-metric model-provider-metric-wide"><span>协议 / 模型端点</span><strong id="model-provider-protocol-value">' + esc(provider ? modelProviderProtocolLabel(provider.protocol) : '--') + '</strong><small id="model-provider-endpoint-value">' + esc(provider && provider.model_endpoint || '尚未获取模型') + '</small></div>' +
             '<div class="model-provider-metric"><span>发现模型</span><strong id="model-provider-model-count">0</strong></div>' +
         '</section>' +
         '<section id="model-provider-chooser" class="model-provider-chooser is-hidden" aria-label="添加模型">' +
@@ -158,8 +172,10 @@ async function viewModelProviderEditor(providerId) {
     modelProviderState.editingId = providerId;
     modelProviderState.discovered = [];
     modelProviderState.selected = provider ? (provider.models || []).slice() : [];
-    modelProviderState.protocol = provider ? provider.protocol : null;
+    modelProviderState.protocol = provider ? provider.protocol : 'OPENAI_COMPATIBLE';
     modelProviderState.endpoint = provider ? provider.model_endpoint : null;
+    modelProviderState.modelConfigs = provider ? JSON.parse(JSON.stringify(provider.model_configs || {})) : {};
+    modelProviderState.modelTests = {};
     contentArea.innerHTML = modelProviderEditorMarkup(provider);
     bindModelProviderEditor();
     renderSelectedProviderModels();
@@ -168,11 +184,26 @@ async function viewModelProviderEditor(providerId) {
 function bindModelProviderEditor() {
     document.getElementById('model-provider-back').addEventListener('click', viewModelProviders);
     document.getElementById('model-provider-key-toggle').addEventListener('click', toggleModelProviderKey);
+    document.getElementById('model-provider-protocol').addEventListener('change', function () {
+        modelProviderState.protocol = this.value;
+        document.getElementById('model-provider-protocol-value').textContent = modelProviderProtocolLabel(this.value);
+        renderSelectedProviderModels();
+    });
+    document.getElementById('model-provider-proxy-mode').addEventListener('change', syncModelProviderProxyFields);
     document.getElementById('model-provider-latency').addEventListener('click', testModelProviderLatency);
     document.getElementById('model-provider-fetch').addEventListener('click', fetchProviderModels);
     document.getElementById('model-provider-add-model').addEventListener('click', toggleProviderModelChooser);
     document.getElementById('model-provider-confirm-model').addEventListener('click', addSelectedProviderModel);
     document.getElementById('model-provider-save').addEventListener('click', saveModelProvider);
+    syncModelProviderProxyFields();
+}
+
+function syncModelProviderProxyFields() {
+    var mode = document.getElementById('model-provider-proxy-mode').value;
+    var fields = document.getElementById('model-provider-proxy-fields');
+    var url = document.getElementById('model-provider-proxy-url');
+    fields.classList.toggle('is-hidden', mode !== 'CUSTOM');
+    url.required = mode === 'CUSTOM';
 }
 
 function toggleModelProviderKey() {
@@ -191,6 +222,12 @@ function readModelProviderConnection() {
     return {
         api_key: document.getElementById('model-provider-api-key').value,
         base_url: document.getElementById('model-provider-base-url').value.trim(),
+        protocol: document.getElementById('model-provider-protocol').value,
+        proxy_mode: document.getElementById('model-provider-proxy-mode').value,
+        proxy_url: document.getElementById('model-provider-proxy-url').value.trim() || null,
+        proxy_username: document.getElementById('model-provider-proxy-username').value.trim() || null,
+        proxy_password: document.getElementById('model-provider-proxy-password').value || null,
+        skip_ssl_verify: document.getElementById('model-provider-skip-ssl').checked,
     };
 }
 
@@ -201,9 +238,6 @@ function setModelProviderButtonBusy(button, busy, busyLabel) {
 }
 
 function setModelProviderStatus(label, state, title) {
-    var badge = document.getElementById('model-connection-badge');
-    badge.textContent = label;
-    badge.className = 'model-connection-badge is-' + state;
     document.getElementById('model-provider-status-title').textContent = title;
 }
 
@@ -252,17 +286,16 @@ async function fetchProviderModels() {
         modelProviderState.protocol = result.protocol;
         modelProviderState.endpoint = result.endpoint;
         renderDiscoveredProviderModels();
-        document.getElementById('model-provider-protocol-value').textContent = result.protocol;
+        document.getElementById('model-provider-protocol-value').textContent = modelProviderProtocolLabel(result.protocol);
         document.getElementById('model-provider-endpoint-value').textContent = result.endpoint;
         document.getElementById('model-provider-latency-value').textContent = result.latency_ms + ' ms';
         setModelProviderStatus('已连接', 'success', '模型列表已获取');
         showToast('已获取 ' + modelProviderState.discovered.length + ' 个模型', 'success');
     } catch (error) {
         modelProviderState.discovered = [];
-        modelProviderState.protocol = null;
         modelProviderState.endpoint = null;
         renderDiscoveredProviderModels();
-        document.getElementById('model-provider-protocol-value').textContent = '手工模式';
+        document.getElementById('model-provider-protocol-value').textContent = modelProviderProtocolLabel(modelProviderState.protocol);
         document.getElementById('model-provider-endpoint-value').textContent = '自动获取失败';
         setModelProviderStatus('需手工配置', 'error', '可手工添加模型');
         showToast(error.message, 'error');
@@ -303,17 +336,129 @@ function renderSelectedProviderModels() {
         return;
     }
     list.innerHTML = modelProviderState.selected.map(function (model) {
+        var config = modelProviderState.modelConfigs[model] || {};
+        var test = modelProviderState.modelTests[model];
+        var metadata = [];
+        if (config.context_window) metadata.push('上下文 ' + config.context_window);
+        if (config.max_output_tokens) metadata.push('最大输出 ' + config.max_output_tokens);
+        var testState = test ? (test.available ? ' is-success' : ' is-error') : '';
+        var testIcon = test ? (test.available ? '✓' : '!') : '▶';
+        var testTitle = test ? (test.available ? '模型可用' : '模型不可用') : '测试 ' + model;
         return '<div class="model-provider-selected-row"><span class="model-provider-model-mark">M</span><strong>' + esc(model) + '</strong>' +
-            '<span>' + esc(modelProviderState.protocol || 'MANUAL') + '</span>' +
-            '<button type="button" data-remove-provider-model="' + escAttr(model) + '" title="移除 ' + escAttr(model) + '" aria-label="移除 ' + escAttr(model) + '">×</button></div>';
+            '<span>' + esc(metadata.join(' · ') || modelProviderProtocolLabel(modelProviderState.protocol)) + '</span>' +
+            '<button class="model-provider-test-button' + testState + '" type="button" data-test-provider-model="' + escAttr(model) + '" title="' + escAttr(testTitle) + '" aria-label="测试 ' + escAttr(model) + '">' + testIcon + '</button>' +
+            '<button class="model-provider-config-button" type="button" data-configure-provider-model="' + escAttr(model) + '" title="配置 ' + escAttr(model) + '" aria-label="配置 ' + escAttr(model) + '">⚙</button>' +
+            '<button class="model-provider-remove-button" type="button" data-remove-provider-model="' + escAttr(model) + '" title="移除 ' + escAttr(model) + '" aria-label="移除 ' + escAttr(model) + '">×</button></div>';
     }).join('');
+    list.querySelectorAll('[data-test-provider-model]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            testProviderModel(button.getAttribute('data-test-provider-model'), button);
+        });
+    });
+    list.querySelectorAll('[data-configure-provider-model]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            openProviderModelConfig(button.getAttribute('data-configure-provider-model'));
+        });
+    });
     list.querySelectorAll('[data-remove-provider-model]').forEach(function (button) {
         button.addEventListener('click', function () {
             var model = button.getAttribute('data-remove-provider-model');
             modelProviderState.selected = modelProviderState.selected.filter(function (item) { return item !== model; });
+            delete modelProviderState.modelConfigs[model];
+            delete modelProviderState.modelTests[model];
             renderSelectedProviderModels();
         });
     });
+}
+
+async function testProviderModel(model, button) {
+    var connection = readModelProviderConnection();
+    if (!connection) return;
+    var config = modelProviderState.modelConfigs[model] || {};
+    button.disabled = true;
+    button.classList.add('is-busy');
+    button.textContent = '…';
+    try {
+        var result = await API.post('/api/model-providers/test-model', {
+            api_key: connection.api_key,
+            base_url: connection.base_url,
+            protocol: connection.protocol,
+            proxy_mode: connection.proxy_mode,
+            proxy_url: connection.proxy_mode === 'CUSTOM' ? connection.proxy_url : null,
+            proxy_username: connection.proxy_mode === 'CUSTOM' ? connection.proxy_username : null,
+            proxy_password: connection.proxy_mode === 'CUSTOM' ? connection.proxy_password : null,
+            skip_ssl_verify: connection.skip_ssl_verify,
+            model_name: model,
+            default_body: config.default_body || {},
+        });
+        modelProviderState.modelTests[model] = result;
+        var httpStatus = result.status_code == null ? '' : ' · HTTP ' + result.status_code;
+        var latency = result.latency_ms == null ? '' : ' · ' + result.latency_ms + ' ms';
+        showToast(model + (result.available ? ' 可用' : ' 不可用') + httpStatus + latency, result.available ? 'success' : 'error');
+    } catch (error) {
+        modelProviderState.modelTests[model] = {
+            available: false,
+            status_code: null,
+            latency_ms: null,
+            error: error.message,
+        };
+        showToast(model + ' 不可用 · ' + error.message, 'error');
+    } finally {
+        renderSelectedProviderModels();
+    }
+}
+
+function openProviderModelConfig(model) {
+    var current = modelProviderState.modelConfigs[model] || {};
+    var overlay = document.createElement('div');
+    overlay.id = 'model-provider-config-overlay';
+    overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal modal-wide model-provider-config-modal" role="dialog" aria-modal="true" aria-labelledby="model-provider-config-title">' +
+        '<div class="modal-header" id="model-provider-config-title">模型配置 · ' + esc(model) + '</div>' +
+        '<div class="modal-body model-provider-config-body">' +
+            '<label class="model-provider-field"><span>上下文窗口 <small>仅元数据</small></span><input class="input" id="model-config-context-window" type="number" min="1" step="1" placeholder="例如 128000" value="' + escAttr(current.context_window || '') + '" /></label>' +
+            '<label class="model-provider-field"><span>最大输出 Token <small>仅元数据</small></span><input class="input" id="model-config-max-output" type="number" min="1" step="1" placeholder="例如 8192" value="' + escAttr(current.max_output_tokens || '') + '" /></label>' +
+            '<label class="model-provider-field model-provider-config-json"><span>默认 Body JSON <small>运行时可被节点高级参数覆盖</small></span><textarea class="input" id="model-config-default-body" spellcheck="false" placeholder="{&quot;max_tokens&quot;: 8192}">' + esc(JSON.stringify(current.default_body || {}, null, 2)) + '</textarea></label>' +
+        '</div>' +
+        '<div class="modal-footer"><button class="btn btn-secondary" id="model-config-cancel" type="button">取消</button><button class="btn btn-primary" id="model-config-save" type="button">保存</button></div>' +
+    '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById('model-config-cancel').addEventListener('click', closeProviderModelConfig);
+    document.getElementById('model-config-save').addEventListener('click', function () {
+        saveProviderModelConfig(model);
+    });
+}
+
+function closeProviderModelConfig() {
+    var overlay = document.getElementById('model-provider-config-overlay');
+    if (overlay) overlay.remove();
+}
+
+function readPositiveOptionalInteger(id, label) {
+    var raw = document.getElementById(id).value.trim();
+    if (!raw) return null;
+    var value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) throw new Error(label + '必须是大于 0 的整数');
+    return value;
+}
+
+function saveProviderModelConfig(model) {
+    try {
+        var defaultBody = JSON.parse(document.getElementById('model-config-default-body').value || '{}');
+        if (!defaultBody || Array.isArray(defaultBody) || typeof defaultBody !== 'object') {
+            throw new Error('默认 Body 必须是 JSON 对象');
+        }
+        modelProviderState.modelConfigs[model] = {
+            context_window: readPositiveOptionalInteger('model-config-context-window', '上下文窗口'),
+            max_output_tokens: readPositiveOptionalInteger('model-config-max-output', '最大输出 Token'),
+            default_body: defaultBody,
+        };
+        closeProviderModelConfig();
+        renderSelectedProviderModels();
+        showToast('模型配置已更新，保存供应商后生效', 'success');
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
 }
 
 async function saveModelProvider() {
@@ -328,9 +473,15 @@ async function saveModelProvider() {
         website_url: document.getElementById('model-provider-website').value.trim() || null,
         api_key: connection.api_key,
         base_url: connection.base_url,
-        protocol: modelProviderState.protocol || 'MANUAL',
+        protocol: connection.protocol,
+        proxy_mode: connection.proxy_mode,
+        proxy_url: connection.proxy_mode === 'CUSTOM' ? connection.proxy_url : null,
+        proxy_username: connection.proxy_mode === 'CUSTOM' ? connection.proxy_username : null,
+        proxy_password: connection.proxy_mode === 'CUSTOM' ? connection.proxy_password : null,
+        skip_ssl_verify: connection.skip_ssl_verify,
         model_endpoint: modelProviderState.endpoint,
         models: modelProviderState.selected.slice(),
+        model_configs: JSON.parse(JSON.stringify(modelProviderState.modelConfigs)),
     };
     var button = document.getElementById('model-provider-save');
     button.disabled = true;
