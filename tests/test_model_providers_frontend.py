@@ -50,6 +50,7 @@ def test_model_provider_frontend_implements_management_and_connection_flow():
     assert 'id="model-provider-proxy-password" type="password"' in source
     assert 'id="model-provider-skip-ssl" type="checkbox"' in source
     assert 'model-provider-checkbox model-provider-ssl-setting' in source
+    assert 'class="model-provider-proxy-control"' in source
     assert "skip_ssl_verify: connection.skip_ssl_verify" in source
     assert "connection.proxy_mode === 'CUSTOM' && connection.skip_ssl_verify" not in source
     assert 'id="model-provider-add-model"' in source
@@ -77,4 +78,5 @@ def test_model_provider_styles_use_existing_theme_contract_and_desktop_layout():
         assert token in source
     assert ':root[data-theme="dark"]' in source
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in source
+    assert "grid-template-columns: minmax(140px, 0.7fr) minmax(190px, 1.3fr)" in source
     assert "@media" not in source

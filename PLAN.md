@@ -1490,6 +1490,7 @@ T13.2.1-T13.2.6 已完成
 - 浏览器 E2E：模型管理详情显示 `OpenAI / Anthropic` 与统一代理枚举 `SYSTEM / DIRECT / CUSTOM`，DeepSeek `deepseek-v4-pro` 真实测试返回 HTTP 200；无结果弹窗，模型行测试按钮直接变为绿色勾选并显示可用、HTTP 状态和延迟提示。齿轮与测试按钮并列，页面无溢出；未点击保存且未修改用户供应商数据。
 - 详情页操作布局：删除右上角“未测试”徽标，保存按钮从底部操作栏移动到右上角且只保留一个入口；测速和模型获取状态继续在页面中部“连接状态”区域展示。专项 `25 passed, 1 warning`，浏览器确认标题栏、表单和操作栏布局正常。
 - SSL 解耦：三种代理模式始终显示“跳过 SSL 证书验证”开关且默认关闭；`DIRECT` 和内网 IP 只负责禁用系统代理，只有显式勾选才设置 `verify=False`。模型网关、供应商 API、持久化和前端专项结果 `44 passed, 1 warning`；浏览器矩阵确认 `SYSTEM / DIRECT / CUSTOM` 下开关均可见，CUSTOM 专属字段只在 CUSTOM 下展开，未保存用户数据。
+- 代理布局优化：代理模式下拉缩短，独立 SSL 开关移动到其右侧同一行并保持垂直对齐；CUSTOM 展开区和连接行为不变。前端专项 `3 passed, 1 warning`、全量 `202 passed, 6 skipped, 1 warning`、JS/Python 静态检查和真实浏览器视觉验收均通过，未保存用户数据。
 - 范围核对：协议、代理、模型默认配置与测试交互只改动模型管理详情；画布源码和构建产物均无 Git 差异。
 - GitHub 发布：实现提交 `2be91ef` 已推送到 `origin/codex/tool-template-refactor`；提交前扫描确认没有 API Key 形式的秘密进入 Git 差异。
 
