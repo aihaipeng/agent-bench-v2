@@ -53,7 +53,7 @@ class ProviderConnectionRequest(_StrictModel):
     proxy_url: str | None = Field(default=None, max_length=2048)
     proxy_username: str | None = Field(default=None, max_length=512)
     proxy_password: str | None = Field(default=None, max_length=4096)
-    skip_ssl_verify: bool = False
+    verify_ssl: bool = True
 
     @field_validator("base_url")
     @classmethod
@@ -246,7 +246,7 @@ async def test_latency(body: ProviderConnectionRequest) -> dict[str, Any]:
                 proxy_url=body.proxy_url,
                 proxy_username=body.proxy_username,
                 proxy_password=body.proxy_password,
-                skip_ssl_verify=body.skip_ssl_verify,
+                verify_ssl=body.verify_ssl,
             )
         ) as client:
             async with client.stream(
@@ -273,7 +273,7 @@ async def fetch_models(body: ProviderConnectionRequest) -> dict[str, Any]:
             proxy_url=body.proxy_url,
             proxy_username=body.proxy_username,
             proxy_password=body.proxy_password,
-            skip_ssl_verify=body.skip_ssl_verify,
+            verify_ssl=body.verify_ssl,
         )
     ) as client:
         for endpoint in build_model_candidates(body.base_url):
@@ -350,7 +350,7 @@ async def test_model_availability(body: ModelAvailabilityRequest) -> dict[str, A
             proxy_url=body.proxy_url,
             proxy_username=body.proxy_username,
             proxy_password=body.proxy_password,
-            skip_ssl_verify=body.skip_ssl_verify,
+            verify_ssl=body.verify_ssl,
         )
         latency_ms = round((time.perf_counter() - started_at) * 1000)
         response_body = redact_sensitive_text(

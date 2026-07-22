@@ -77,8 +77,8 @@ def test_model_provider_repository_restart_round_trip(tmp_path):
 
 
 @pytest.mark.parametrize("proxy_mode", ["SYSTEM", "DIRECT", "CUSTOM"])
-def test_skip_ssl_verify_is_independent_from_proxy_mode(tmp_path, proxy_mode):
-    overrides = {"proxy_mode": proxy_mode, "skip_ssl_verify": True}
+def test_verify_ssl_is_independent_from_proxy_mode(tmp_path, proxy_mode):
+    overrides = {"proxy_mode": proxy_mode, "verify_ssl": False}
     if proxy_mode == "CUSTOM":
         overrides["proxy_url"] = "http://proxy.local:8080"
     record = ModelProviderRepository(tmp_path / "models.sqlite3").create(
@@ -86,20 +86,20 @@ def test_skip_ssl_verify_is_independent_from_proxy_mode(tmp_path, proxy_mode):
     )
 
     assert record.proxy_mode == proxy_mode
-    assert record.skip_ssl_verify is True
+    assert record.verify_ssl is False
 
     connection_values = {
         "base_url": "https://api.example.com",
         "api_key": "secret",
         "proxy_mode": proxy_mode,
-        "skip_ssl_verify": True,
+        "verify_ssl": False,
     }
     if proxy_mode == "CUSTOM":
         connection_values["proxy_url"] = "http://proxy.local:8080"
     connection = routes_model_providers.ProviderConnectionRequest(
         **connection_values
     )
-    assert connection.skip_ssl_verify is True
+    assert connection.verify_ssl is False
 
 
 def test_model_provider_repository_migrates_existing_table(tmp_path):
@@ -125,7 +125,38 @@ def test_model_provider_repository_migrates_existing_table(tmp_path):
     assert restored is not None
     assert restored.proxy_mode == "SYSTEM"
     assert restored.proxy_url is None
+    assert restored.verify_ssl is True
     assert restored.model_configs == {}
+
+
+def test_model_provider_repository_migrates_negative_ssl_setting(tmp_path):
+    database_path = tmp_path / "agent_bench.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE model_providers (
+                id TEXT PRIMARY KEY, name TEXT, website_url TEXT, api_key TEXT NOT NULL,
+                base_url TEXT NOT NULL, protocol TEXT NOT NULL,
+                proxy_mode TEXT NOT NULL, proxy_url TEXT, proxy_username TEXT,
+                proxy_password TEXT, skip_ssl_verify INTEGER NOT NULL,
+                model_endpoint TEXT, models_json TEXT NOT NULL,
+                model_configs_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO model_providers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-insecure", "Legacy", None, "secret",
+                "https://api.example.com", "OPENAI_COMPATIBLE", "DIRECT",
+                None, None, None, 1, None, '["model-1"]', '{}', "now", "now",
+            ),
+        )
+
+    restored = ModelProviderRepository(database_path).get("legacy-insecure")
+    assert restored is not None
+    assert restored.verify_ssl is False
 
 
 def test_model_provider_api_crud_and_list_hides_api_key(tmp_path, monkeypatch):
@@ -136,12 +167,14 @@ def test_model_provider_api_crud_and_list_hides_api_key(tmp_path, monkeypatch):
     assert created_response.status_code == 200
     created = created_response.json()["provider"]
     assert created["api_key"] == "local-secret"
+    assert created["verify_ssl"] is True
 
     listed = client.get("/api/model-providers").json()["providers"]
     assert len(listed) == 1
     assert "api_key" not in listed[0]
     assert "proxy_url" not in listed[0]
     assert "model_configs" not in listed[0]
+    assert "verify_ssl" not in listed[0]
     assert listed[0]["proxy_mode"] == "SYSTEM"
     assert client.get(f"/api/model-providers/{created['id']}").json()["provider"] == created
 
@@ -289,8 +322,7 @@ def test_anthropic_model_discovery_uses_selected_protocol_headers(tmp_path, monk
                 "base_url": f"http://127.0.0.1:{server.server_port}",
                 "api_key": "anthropic-secret",
                 "protocol": "ANTHROPIC",
-                "proxy_mode": "CUSTOM",
-                "proxy_url": "http://127.0.0.1:1",
+                "proxy_mode": "DIRECT",
             },
         )
     finally:

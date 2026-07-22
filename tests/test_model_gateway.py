@@ -12,7 +12,6 @@ from execution import (
     deep_merge_model_request,
     invoke_anthropic,
     invoke_openai_compatible,
-    is_internal_ip_url,
     model_http_client_options,
     parse_anthropic_response,
     parse_openai_compatible_response,
@@ -128,7 +127,7 @@ def test_anthropic_request_uses_required_default_and_user_overrides():
     )["max_tokens"] == DEFAULT_ANTHROPIC_MAX_TOKENS
 
 
-def test_anthropic_url_and_internal_network_client_policy():
+def test_anthropic_url_and_explicit_proxy_client_policy():
     assert anthropic_messages_url("https://api.anthropic.com") == (
         "https://api.anthropic.com/v1/messages"
     )
@@ -138,22 +137,13 @@ def test_anthropic_url_and_internal_network_client_policy():
     assert anthropic_messages_url("https://gateway.example/v1/messages") == (
         "https://gateway.example/v1/messages"
     )
-    assert is_internal_ip_url("https://10.20.30.40:8443/v1") is True
-    assert is_internal_ip_url("http://127.0.0.1:8000") is True
-    assert is_internal_ip_url("https://[fd00::1]/v1") is True
-    assert is_internal_ip_url("https://api.anthropic.com") is False
-
     internal = model_http_client_options(
         "https://10.20.30.40:8443/v1", timeout_seconds=120
     )
     public = model_http_client_options(
         "https://api.anthropic.com", timeout_seconds=120
     )
-    assert internal == {
-        "follow_redirects": True,
-        "timeout": 120,
-        "trust_env": False,
-    }
+    assert internal == {"follow_redirects": True, "timeout": 120}
     assert public == {"follow_redirects": True, "timeout": 120}
     assert model_http_client_options(
         "https://api.anthropic.com",
@@ -168,7 +158,7 @@ def test_anthropic_url_and_internal_network_client_policy():
         "https://api.anthropic.com",
         timeout_seconds=120,
         proxy_mode="SYSTEM",
-        skip_ssl_verify=True,
+        verify_ssl=False,
     ) == {
         "follow_redirects": True,
         "timeout": 120,
@@ -177,11 +167,10 @@ def test_anthropic_url_and_internal_network_client_policy():
     assert model_http_client_options(
         "https://10.20.30.40:8443/v1",
         timeout_seconds=120,
-        skip_ssl_verify=True,
+        verify_ssl=False,
     ) == {
         "follow_redirects": True,
         "timeout": 120,
-        "trust_env": False,
         "verify": False,
     }
     assert model_http_client_options(
@@ -191,7 +180,7 @@ def test_anthropic_url_and_internal_network_client_policy():
         proxy_url="http://proxy.internal:8080",
         proxy_username="domain user",
         proxy_password="p@ss:word",
-        skip_ssl_verify=True,
+        verify_ssl=False,
     ) == {
         "follow_redirects": True,
         "timeout": 120,
@@ -204,7 +193,12 @@ def test_anthropic_url_and_internal_network_client_policy():
         timeout_seconds=120,
         proxy_mode="CUSTOM",
         proxy_url="http://proxy.internal:8080",
-    ) == internal
+    ) == {
+        "follow_redirects": True,
+        "timeout": 120,
+        "trust_env": False,
+        "proxy": "http://proxy.internal:8080",
+    }
 
 
 def test_openai_compatible_transport_forwards_body_without_parameter_translation():

@@ -67,7 +67,7 @@ class ModelProviderConfiguration(_ModelProviderModel):
     proxy_url: str | None = Field(default=None, max_length=2048)
     proxy_username: str | None = Field(default=None, max_length=512)
     proxy_password: str | None = Field(default=None, max_length=4096)
-    skip_ssl_verify: bool = False
+    verify_ssl: bool = True
     model_endpoint: str | None = Field(default=None, max_length=2048)
     models: list[str] = Field(min_length=1, max_length=500)
     model_configs: dict[str, ModelRuntimeConfiguration] = Field(default_factory=dict)
@@ -204,7 +204,7 @@ class ModelProviderSummary(_ModelProviderModel):
                     "proxy_url",
                     "proxy_username",
                     "proxy_password",
-                    "skip_ssl_verify",
+                    "verify_ssl",
                     "model_configs",
                 },
             )
@@ -265,7 +265,7 @@ class ModelProviderRepository:
                         proxy_url TEXT,
                         proxy_username TEXT,
                         proxy_password TEXT,
-                        skip_ssl_verify INTEGER NOT NULL DEFAULT 0,
+                        verify_ssl INTEGER NOT NULL DEFAULT 1,
                         model_endpoint TEXT,
                         models_json TEXT NOT NULL,
                         model_configs_json TEXT NOT NULL DEFAULT '{}',
@@ -296,10 +296,14 @@ class ModelProviderRepository:
                     connection.execute(
                         "ALTER TABLE model_providers ADD COLUMN proxy_password TEXT"
                     )
-                if "skip_ssl_verify" not in columns:
+                if "verify_ssl" not in columns:
                     connection.execute(
-                        "ALTER TABLE model_providers ADD COLUMN skip_ssl_verify INTEGER NOT NULL DEFAULT 0"
+                        "ALTER TABLE model_providers ADD COLUMN verify_ssl INTEGER NOT NULL DEFAULT 1"
                     )
+                    if "skip_ssl_verify" in columns:
+                        connection.execute(
+                            "UPDATE model_providers SET verify_ssl = CASE WHEN skip_ssl_verify = 1 THEN 0 ELSE 1 END"
+                        )
                 if "model_configs_json" not in columns:
                     connection.execute(
                         "ALTER TABLE model_providers ADD COLUMN model_configs_json TEXT NOT NULL DEFAULT '{}'"
@@ -316,7 +320,7 @@ class ModelProviderRepository:
                     INSERT INTO model_providers(
                         id, name, website_url, api_key, base_url, protocol,
                         proxy_mode, proxy_url, proxy_username, proxy_password,
-                        skip_ssl_verify, model_endpoint, models_json,
+                        verify_ssl, model_endpoint, models_json,
                         model_configs_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -325,7 +329,7 @@ class ModelProviderRepository:
                         values["api_key"], values["base_url"], values["protocol"],
                         values["proxy_mode"], values["proxy_url"],
                         values["proxy_username"], values["proxy_password"],
-                        int(values["skip_ssl_verify"]),
+                        int(values["verify_ssl"]),
                         values["model_endpoint"],
                         json.dumps(values["models"], ensure_ascii=False),
                         json.dumps(values["model_configs"], ensure_ascii=False),
@@ -359,7 +363,7 @@ class ModelProviderRepository:
                 UPDATE model_providers
                 SET name = ?, website_url = ?, api_key = ?, base_url = ?,
                     protocol = ?, proxy_mode = ?, proxy_url = ?, model_endpoint = ?,
-                    proxy_username = ?, proxy_password = ?, skip_ssl_verify = ?,
+                    proxy_username = ?, proxy_password = ?, verify_ssl = ?,
                     models_json = ?, model_configs_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -368,7 +372,7 @@ class ModelProviderRepository:
                     values["base_url"], values["protocol"], values["proxy_mode"],
                     values["proxy_url"], values["model_endpoint"],
                     values["proxy_username"], values["proxy_password"],
-                    int(values["skip_ssl_verify"]),
+                    int(values["verify_ssl"]),
                     json.dumps(values["models"], ensure_ascii=False),
                     json.dumps(values["model_configs"], ensure_ascii=False),
                     values["updated_at"], values["id"],
@@ -406,7 +410,7 @@ class ModelProviderRepository:
             protocol=row["protocol"], proxy_mode=row["proxy_mode"],
             proxy_url=row["proxy_url"], proxy_username=row["proxy_username"],
             proxy_password=row["proxy_password"],
-            skip_ssl_verify=bool(row["skip_ssl_verify"]),
+            verify_ssl=bool(row["verify_ssl"]),
             model_endpoint=row["model_endpoint"],
             models=json.loads(row["models_json"]), created_at=row["created_at"],
             model_configs=json.loads(row["model_configs_json"]),

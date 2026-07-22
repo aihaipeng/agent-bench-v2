@@ -294,7 +294,7 @@ def _provider_request_options(provider) -> dict[str, Any]:
         "proxy_url": provider.proxy_url,
         "proxy_username": provider.proxy_username,
         "proxy_password": provider.proxy_password,
-        "skip_ssl_verify": provider.skip_ssl_verify,
+        "verify_ssl": provider.verify_ssl,
     }
 
 

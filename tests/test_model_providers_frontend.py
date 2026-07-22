@@ -48,11 +48,18 @@ def test_model_provider_frontend_implements_management_and_connection_flow():
     assert 'id="model-provider-proxy-url"' in source
     assert 'id="model-provider-proxy-username"' in source
     assert 'id="model-provider-proxy-password" type="password"' in source
-    assert 'id="model-provider-skip-ssl" type="checkbox"' in source
-    assert 'model-provider-checkbox model-provider-ssl-setting' in source
+    assert 'id="model-provider-verify-ssl" type="checkbox" role="switch"' in source
+    assert 'model-provider-switch model-provider-ssl-setting' in source
+    assert 'class="model-provider-switch-track"' in source
     assert 'class="model-provider-proxy-control"' in source
-    assert "skip_ssl_verify: connection.skip_ssl_verify" in source
-    assert "connection.proxy_mode === 'CUSTOM' && connection.skip_ssl_verify" not in source
+    assert 'class="model-provider-proxy-help"' in source
+    assert 'role="tooltip"' in source
+    assert "如何选择代理模式？" in source
+    assert "HTTP_PROXY / HTTPS_PROXY / NO_PROXY" in source
+    assert "SSL 证书验证独立于代理模式" in source
+    assert "verify_ssl: connection.verify_ssl" in source
+    assert "skip_ssl_verify" not in source
+    assert "syncModelProviderSslWarning" in source
     assert 'id="model-provider-add-model"' in source
     assert 'id="model-provider-discovered"' in source
     assert 'id="model-provider-manual"' in source
@@ -79,4 +86,6 @@ def test_model_provider_styles_use_existing_theme_contract_and_desktop_layout():
     assert ':root[data-theme="dark"]' in source
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in source
     assert "grid-template-columns: minmax(140px, 0.7fr) minmax(190px, 1.3fr)" in source
+    assert ".model-provider-switch input:checked + .model-provider-switch-track" in source
+    assert ".model-provider-proxy-help[open] .model-provider-proxy-help-panel" in source
     assert "@media" not in source
